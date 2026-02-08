@@ -869,39 +869,25 @@ def positions():
         console.print("[dim]No open positions[/dim]")
         raise typer.Exit()
 
-    # Fetch market details for each position to get titles/subtitles
-    console.print("[dim]Loading market details...[/dim]")
-    ticker_to_market = {}
-    for p in ps:
-        ticker = p.get("ticker", "")
-        if ticker and ticker not in ticker_to_market:
-            try:
-                market_data = api("GET", "markets/" + ticker)
-                ticker_to_market[ticker] = market_data.get("market", {})
-            except ApiError:
-                ticker_to_market[ticker] = {}
-
     t = Table(title="Current Positions", box=box.ROUNDED)
     t.add_column("Ticker", style="cyan", max_width=28)
-    t.add_column("Side", max_width=24)
+    t.add_column("Side", max_width=20)
     t.add_column("Qty", justify="right")
     t.add_column("Exposure", justify="right", style="yellow")
 
     for p in ps:
         pos = p.get("position", 0)
-        ticker = p.get("ticker", "")
-        market = ticker_to_market.get(ticker, {})
         side = _position_side_label(
-            market.get("yes_sub_title", "") or "",
-            market.get("no_sub_title", "") or "",
+            p.get("yes_sub_title", "") or "",
+            p.get("no_sub_title", "") or "",
             pos,
-            market.get("title", "")
+            p.get("title", "")
         )
         side_str = "[green]Yes[/green]" if pos > 0 else "[red]No[/red]"
         if side not in ("Yes", "No"):
             side_str = side
         t.add_row(
-            ticker,
+            p.get("ticker", ""),
             side_str,
             str(abs(pos)),
             fmt_dollars(p.get("market_exposure_dollars", 0)),
@@ -1044,11 +1030,32 @@ def cancel(
 
 @app.command(name="setup-shell")
 def setup_shell():
-    """Add KALSHI_ACCESS_KEY to your shell config"""
+    """Add KALSHI_ACCESS_KEY to your shell config and create RSA private key template"""
     load_env()
     key_id = os.getenv("KALSHI_ACCESS_KEY")
+    
+    # Create ~/.kalshi directory and files if they don't exist
+    kalshi_dir = os.path.expanduser("~/.kalshi")
+    os.makedirs(kalshi_dir, exist_ok=True)
+    
+    env_path = os.path.join(kalshi_dir, '.env')
+    if not os.path.exists(env_path):
+        with open(env_path, "w") as f:
+            f.write(f'KALSHI_ACCESS_KEY={key_id or "your_access_key_here"}\n')
+        console.print(f"[green]Created[/green] {env_path}")
+    elif key_id and key_id not in open(env_path).read():
+        with open(env_path, "a") as f:
+            f.write(f'KALSHI_ACCESS_KEY={key_id}\n')
+        console.print(f"[green]Updated[/green] {env_path}")
+    
+    key_path = os.path.join(kalshi_dir, 'private_key.pem')
+    if not os.path.exists(key_path):
+        with open(key_path, "w") as f:
+            f.write("# Place your RSA private key here\n# Get it from: https://kalshi.com/api\n-----BEGIN RSA PRIVATE KEY-----\nyour_private_key_here\n-----END RSA PRIVATE KEY-----\n")
+        console.print(f"[yellow]Created[/yellow] {key_path} — paste your RSA private key here")
+    
     if not key_id:
-        console.print("[red]Error:[/red] No KALSHI_ACCESS_KEY found in ~/.kalshi/.env")
+        console.print("[red]Error:[/red] No KALSHI_ACCESS_KEY found. Add it to ~/.kalshi/.env")
         raise typer.Exit(1)
 
     line = f'export KALSHI_ACCESS_KEY="{key_id}"\n'
@@ -1070,6 +1077,9 @@ def setup_shell():
                 updated = True
 
     if updated:
+        console.print("\n✅ Setup complete!")
+        console.print("   - ~/.kalshi/.env has your API key")
+        console.print("   - ~/.kalshi/private_key.pem needs your RSA key")
         console.print("\nRestart your terminal or run [bold]source ~/.bashrc[/bold]")
     else:
         console.print("[dim]No shell config files found (~/.bashrc or ~/.zshrc)[/dim]")
