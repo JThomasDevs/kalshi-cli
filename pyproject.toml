@@ -1,6 +1,6 @@
 [project]
 name = "kalshi-cli"
-version = "1.0.0"
+version = "1.2.0"
 description = "Interactive CLI for trading prediction markets on Kalshi"
 requires-python = ">=3.10"
 dependencies = [
