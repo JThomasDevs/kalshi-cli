@@ -204,6 +204,92 @@ def fmt_expiry(raw) -> str:
         return str(raw)[:16]
 
 
+def is_parlay(m: dict) -> bool:
+    """Detect parlay/combo markets by checking for multiple comma-separated legs."""
+    for field in ("yes_sub_title", "no_sub_title", "title"):
+        val = m.get(field, "") or ""
+        if val.count(",") >= 2:
+            return True
+    return False
+
+
+def _fmt_legs(text: str) -> str:
+    """Format comma-separated parlay legs as one leg per line."""
+    if not text:
+        return text
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if len(parts) <= 1:
+        return text
+    return "\n".join(parts)
+
+
+def _is_binary_yes_no_market(title: str) -> bool:
+    """True if the market is a single yes/no proposition (e.g. 'Will Gavin Newsom be...') not a multi-outcome pick."""
+    if not title:
+        return False
+    t = title.strip().lower()
+    # "Will [X] be/have/win..." = one proposition → binary
+    if t.startswith("will ") and (" be " in t or " win " in t or " have " in t or " the " in t):
+        return True
+    return False
+
+
+def _position_side_label(yes_sub: str, no_sub: str, position: int, title: str = "") -> str:
+    """Side column: multifaceted markets show the choice (e.g. Anduril, May 31 2026); yes/no markets show Yes or No."""
+    if position < 0:
+        return "No"
+    if _is_binary_yes_no_market(title):
+        return "Yes"
+    # Holding Yes: show outcome name for multi-outcome markets, else "Yes"
+    sub = yes_sub or ""
+    if not sub:
+        return "Yes"
+    parts = [p.strip() for p in sub.split(",") if p.strip()]
+    if len(parts) >= 2 and all(
+        p.lower().startswith("yes ") or p.lower().startswith("no ") for p in parts
+    ):
+        return "Yes"
+    if sub.strip().lower().startswith("yes "):
+        return sub.strip()[4:].strip()
+    if sub.strip().lower().startswith("no "):
+        return sub.strip()[3:].strip()
+    return sub.strip()
+
+
+def _parse_leg(leg: str) -> tuple:
+    """Split a leg into (outcome, title). Outcome is 'yes'/'no', title is the proposition."""
+    leg = leg.strip()
+    if leg.lower().startswith("yes "):
+        return ("yes", leg[4:].strip())
+    if leg.lower().startswith("no "):
+        return ("no", leg[3:].strip())
+    return ("yes", leg)
+
+
+def _outcome_column(m: dict) -> str:
+    """Outcome column: for parlays, yes/no per line; for single-outcome markets, the outcome name (e.g. 'Wind', 'Taylor Swift')."""
+    sub = m.get("yes_sub_title", "") or m.get("no_sub_title", "") or ""
+    if not sub:
+        return "Yes"
+    parts = [p.strip() for p in sub.split(",") if p.strip()]
+    if len(parts) <= 1:
+        # Single-outcome market: show the outcome name (what you're betting on)
+        return sub.strip()
+    # Parlay: show yes/no per leg
+    return "\n".join(_parse_leg(p)[0] for p in parts)
+
+
+def _title_column(m: dict) -> str:
+    """Title column: one proposition (title) per line for each leg."""
+    raw = m.get("title", "") or m.get("yes_sub_title", "") or m.get("no_sub_title", "") or ""
+    if not raw:
+        return ""
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if len(parts) <= 1:
+        return _parse_leg(raw)[1] if raw else raw
+    return "\n".join(_parse_leg(p)[1] for p in parts)
+
+
 def market_table(markets: list, title: str = "Markets", show_expiry: bool = False) -> Table:
     """Build a rich table for a list of markets.
 
@@ -787,16 +873,24 @@ def positions():
 
     t = Table(title="Current Positions", box=box.ROUNDED)
     t.add_column("Ticker", style="cyan", max_width=28)
-    t.add_column("Side", justify="center")
+    t.add_column("Side", max_width=20)
     t.add_column("Qty", justify="right")
     t.add_column("Exposure", justify="right", style="yellow")
 
     for p in ps:
         pos = p.get("position", 0)
-        side = "[green]Yes[/green]" if pos > 0 else "[red]No[/red]"
+        side = _position_side_label(
+            p.get("yes_sub_title", "") or "",
+            p.get("no_sub_title", "") or "",
+            pos,
+            p.get("title", "")
+        )
+        side_str = "[green]Yes[/green]" if pos > 0 else "[red]No[/red]"
+        if side not in ("Yes", "No"):
+            side_str = side
         t.add_row(
             p.get("ticker", ""),
-            side,
+            side_str,
             str(abs(pos)),
             fmt_dollars(p.get("market_exposure_dollars", 0)),
         )
