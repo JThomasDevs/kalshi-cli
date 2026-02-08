@@ -1066,21 +1066,28 @@ def _enrich_positions(ps: list) -> list:
     return enriched
 
 
+def _position_current_value(p: dict) -> float:
+    """Current market value of position (qty × bid price for the side held)."""
+    try:
+        pos = p.get("position", 0)
+        if pos > 0:
+            price = float(p.get("yes_bid_dollars", 0) or 0)
+        else:
+            price = float(p.get("no_bid_dollars", 0) or 0)
+        return abs(pos) * price
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def _position_return_pct(p: dict) -> str:
     """Calculate unrealized return % for a position.
     Return = (current_value - cost) / cost * 100
     """
     try:
-        pos = p.get("position", 0)
         cost = float(p.get("total_traded_dollars", 0) or 0)
         if cost <= 0:
             return "—"
-        # Current value based on bid for the side we hold
-        if pos > 0:
-            price = float(p.get("yes_bid_dollars", 0) or 0)
-        else:
-            price = float(p.get("no_bid_dollars", 0) or 0)
-        current_value = abs(pos) * price
+        current_value = _position_current_value(p)
         pnl = current_value - cost
         pct = (pnl / cost) * 100
         if pct >= 0:
@@ -1115,6 +1122,7 @@ def positions(
     t.add_column("Side", max_width=25)
     t.add_column("Qty", justify="right")
     t.add_column("Exposure", justify="right", style="yellow")
+    t.add_column("Value", justify="right")
     t.add_column("Return", justify="right")
     t.add_column("Expires", style="dim")
     t.add_column("Ticker", style="cyan", max_width=28)
@@ -1127,6 +1135,7 @@ def positions(
             side_str,
             str(abs(p.get("position", 0))),
             fmt_dollars(p.get("market_exposure_dollars", 0)),
+            fmt_dollars(_position_current_value(p)),
             _position_return_pct(p),
             fmt_expiry(p.get("expiration_time", "")),
             p.get("ticker", ""),
