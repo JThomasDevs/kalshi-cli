@@ -1,13 +1,14 @@
-{
-  "name": "kalshi-agent",
-  "version": "0.2.0",
-  "description": "Kalshi prediction market analysis and trading",
-  "entry_point": "cli.py",
-  "requires_python": ">=3.10",
-  "dependencies": [
+[project]
+name = "kalshi-cli"
+version = "1.0.0"
+description = "Interactive CLI for trading prediction markets on Kalshi"
+requires-python = ">=3.10"
+dependencies = [
     "requests>=2.31.0",
     "cryptography>=41.0.0",
     "rich>=13.7.0",
     "typer>=0.9.0"
-  ]
-}
+]
+
+[project.scripts]
+kalshi = "cli:app"

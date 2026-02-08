@@ -16,12 +16,20 @@ Built with Python, [Typer](https://typer.tiangolo.com/), and [Rich](https://rich
 
 ## Installation
 
-### Requirements
+### pipx (recommended)
 
-- Python 3.10+
-- A [Kalshi](https://kalshi.com) account with API access
+```bash
+# Install pipx if you don't have it
+python3 -m pip install --user pipx
+pipx ensurepath
 
-### Setup
+# Install kalshi-cli
+pipx install git+https://github.com/JThomasDevs/kalshi-cli.git
+```
+
+The `kalshi` command will be available globally.
+
+### Manual Setup
 
 ```bash
 # Clone the repo
