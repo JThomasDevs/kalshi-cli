@@ -19,59 +19,27 @@ Built with Python, [Typer](https://typer.tiangolo.com/), and [Rich](https://rich
 
 ## Installation
 
-### pipx (recommended)
-
 ```bash
-# Install pipx if you don't have it
-python3 -m pip install --user pipx
-pipx ensurepath
-
-# Install kalshi-cli
-pipx install git+https://github.com/JThomasDevs/kalshi-cli.git
+npm install -g kalshi-cli
 ```
 
-The `kalshi` command will be available globally.
+This installs the `kalshi` command globally. The postinstall script automatically clones the repo, sets up a Python virtual environment, and installs dependencies.
 
-### Manual Setup
-
-```bash
-# Clone the repo
-git clone https://github.com/JThomasDevs/kalshi-cli.git
-cd kalshi-cli
-
-# Create a virtual environment and install dependencies
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+**Requirements:** Python 3.10+ and Node.js/npm.
 
 ### API Credentials
 
 1. Generate API credentials at [kalshi.com/api](https://kalshi.com/api)
-2. Save your RSA private key:
-
-```bash
-mkdir -p ~/.kalshi
-# Place your private key at ~/.kalshi/private_key.pem
-```
-
+2. Place your RSA private key at `~/.kalshi/private_key.pem`
 3. Set your access key in `~/.kalshi/.env`:
 
 ```
 KALSHI_ACCESS_KEY=your_access_key_id
 ```
 
-Or run `python cli.py setup-shell` to export it to your shell config automatically.
+Or run `kalshi setup-shell` to export it to your shell config automatically.
 
-### Shell Alias (optional)
-
-Add to your `~/.bashrc` or `~/.zshrc`:
-
-```bash
-alias kalshi="/path/to/kalshi-cli/.venv/bin/python3 /path/to/kalshi-cli/cli.py"
-```
-
-Then use `kalshi` from anywhere.
+Template files are created at `~/.kalshi/` during installation if they don't exist.
 
 ## Usage
 
