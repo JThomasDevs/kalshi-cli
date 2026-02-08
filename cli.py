@@ -1076,4 +1076,4 @@ def setup_shell():
 
 
 if __name__ == "__main__":
-    app()
+    app(prog_name="kalshi")
