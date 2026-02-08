@@ -869,25 +869,39 @@ def positions():
         console.print("[dim]No open positions[/dim]")
         raise typer.Exit()
 
+    # Fetch market details for each position to get titles/subtitles
+    console.print("[dim]Loading market details...[/dim]")
+    ticker_to_market = {}
+    for p in ps:
+        ticker = p.get("ticker", "")
+        if ticker and ticker not in ticker_to_market:
+            try:
+                market_data = api("GET", "markets/" + ticker)
+                ticker_to_market[ticker] = market_data.get("market", {})
+            except ApiError:
+                ticker_to_market[ticker] = {}
+
     t = Table(title="Current Positions", box=box.ROUNDED)
     t.add_column("Ticker", style="cyan", max_width=28)
-    t.add_column("Side", max_width=20)
+    t.add_column("Side", max_width=24)
     t.add_column("Qty", justify="right")
     t.add_column("Exposure", justify="right", style="yellow")
 
     for p in ps:
         pos = p.get("position", 0)
+        ticker = p.get("ticker", "")
+        market = ticker_to_market.get(ticker, {})
         side = _position_side_label(
-            p.get("yes_sub_title", "") or "",
-            p.get("no_sub_title", "") or "",
+            market.get("yes_sub_title", "") or "",
+            market.get("no_sub_title", "") or "",
             pos,
-            p.get("title", "")
+            market.get("title", "")
         )
         side_str = "[green]Yes[/green]" if pos > 0 else "[red]No[/red]"
         if side not in ("Yes", "No"):
             side_str = side
         t.add_row(
-            p.get("ticker", ""),
+            ticker,
             side_str,
             str(abs(pos)),
             fmt_dollars(p.get("market_exposure_dollars", 0)),
