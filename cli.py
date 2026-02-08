@@ -266,62 +266,180 @@ def _parse_leg(leg: str) -> tuple:
     return ("yes", leg)
 
 
-def _outcome_column(m: dict) -> str:
-    """Outcome column: for parlays, yes/no per line; for single-outcome markets, the outcome name (e.g. 'Wind', 'Taylor Swift')."""
-    sub = m.get("yes_sub_title", "") or m.get("no_sub_title", "") or ""
-    if not sub:
-        return "Yes"
+def _outcome_from_ticker(ticker: str) -> str:
+    """Derive a short outcome label from market ticker (e.g. range/strike suffix). KXBTC-95-96 -> 95-96; KXBTC-26FEB0917-B74250 -> $97,425)."""
+    if not ticker or "-" not in ticker:
+        return ""
+    parts = ticker.split("-")
+    if len(parts) >= 3:
+        suffix = "-".join(parts[-2:])  # e.g. 95-96 or 26FEB0917-B74250
+        # Price-range style: last segment is strike in dollars (e.g. B74250 → $74,250 or above)
+        last = parts[-1]
+        if len(last) >= 4 and last[0].isalpha() and last[1:].isdigit():
+            try:
+                num = int(last[1:])
+                # 1 letter + 4 digits: letter = leading digit (A=0..I=9), e.g. I7425 → 97425
+                if len(last) == 5 and last[0].upper() in "ABCDEFGHIJ":
+                    lead = "ABCDEFGHIJ".index(last[0].upper())
+                    num = lead * 10000 + num
+                if num >= 1000:
+                    return f"${num:,} or above"
+            except ValueError:
+                pass
+        if len(last) >= 2 and last.isdigit():
+            try:
+                num = int(last)
+                if num >= 1000:
+                    return f"${num:,} or above"
+            except ValueError:
+                pass
+        return suffix
+    return parts[-1] if parts else ""
+
+
+def _is_generic_subtitle(sub: str) -> bool:
+    """True if subtitle is just 'yes'/'no' with no actual outcome label (e.g. range markets)."""
+    s = (sub or "").strip().lower()
+    return s in ("yes", "no")
+
+
+def _is_parlay_subtitle(sub: str) -> bool:
+    """True if subtitle looks like parlay legs: 'Yes Team A wins, No Team B wins'."""
     parts = [p.strip() for p in sub.split(",") if p.strip()]
-    if len(parts) <= 1:
-        # Single-outcome market: show the outcome name (what you're betting on)
-        return sub.strip()
-    # Parlay: show yes/no per leg
-    return "\n".join(_parse_leg(p)[0] for p in parts)
+    if len(parts) < 2:
+        return False
+    return all(
+        p.lower().startswith("yes ") or p.lower().startswith("no ")
+        for p in parts
+    )
+
+
+def _outcome_column(m: dict) -> str:
+    """Outcome column: for parlays, yes/no per line; for single-outcome markets, the outcome name.
+
+    Priority:
+    1. Subtitle (yes_sub_title / no_sub_title) — if it's a real label, not generic "yes"/"no"
+       e.g. "Trump", "Norway", "$79,500 or above"
+    2. Strike / ticker-derived label — range markets
+    3. Fallback "Yes"
+    """
+    # 1. Try subtitle first (mention markets, Olympics, range markets, multi-outcome)
+    sub = m.get("yes_sub_title", "") or m.get("no_sub_title", "") or ""
+    if sub and not _is_generic_subtitle(sub):
+        if _is_parlay_subtitle(sub):
+            # Parlay: show yes/no per leg
+            parts = [p.strip() for p in sub.split(",") if p.strip()]
+            return "\n".join(_parse_leg(p)[0] for p in parts)
+        # Single outcome: strip "Yes "/"No " prefix if present
+        return _parse_leg(sub.strip())[1]
+    # 2. Fall back to strike/range from API or ticker
+    out = m.get("strike") or m.get("strike_price") or m.get("resolution_value")
+    if out is not None and str(out).strip():
+        return str(out).strip()
+    ticker = m.get("ticker", "") or m.get("market_ticker", "") or ""
+    out = _outcome_from_ticker(ticker)
+    if out:
+        return out
+    return "Yes"
+
+
+def _normalize_title(raw: str) -> str:
+    """Single line: collapse newlines and extra spaces."""
+    if not raw:
+        return ""
+    return " ".join(str(raw).split())
 
 
 def _title_column(m: dict) -> str:
-    """Title column: one proposition (title) per line for each leg."""
+    """Title column: one proposition (title) per line for each leg (parlays only)."""
     raw = m.get("title", "") or m.get("yes_sub_title", "") or m.get("no_sub_title", "") or ""
+    raw = _normalize_title(raw)
     if not raw:
         return ""
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
-    if len(parts) <= 1:
-        return _parse_leg(raw)[1] if raw else raw
-    return "\n".join(_parse_leg(p)[1] for p in parts)
+    if _is_parlay_subtitle(raw):
+        # Parlay: show each leg's title on its own line
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        return "\n".join(_parse_leg(p)[1] for p in parts)
+    # Single market: show title as-is (strip "Yes "/"No " prefix if present)
+    return _parse_leg(raw)[1] if raw else raw
 
 
-def market_table(markets: list, title: str = "Markets", show_expiry: bool = False) -> Table:
+def _is_up_down_market(markets: list) -> bool:
+    """Detect up/down price markets (e.g. 'BTC price up in next 15 mins?')."""
+    if not markets:
+        return False
+    return all(
+        "up" in (m.get("title", "") or "").lower()
+        and ("price" in (m.get("title", "") or "").lower() or "15 min" in (m.get("title", "") or "").lower())
+        for m in markets
+    )
+
+
+def _clean_up_down_outcome(sub: str) -> str:
+    """Clean up 'Price to beat: $70,783.57' → 'Target: $70,783.57'."""
+    s = (sub or "").strip()
+    if s.lower().startswith("price to beat:"):
+        return "Target:" + s[len("price to beat:"):]
+    return s
+
+
+def market_table(markets: list, title: str = "Markets", show_expiry: bool = False, numbered: bool = False) -> Table:
     """Build a rich table for a list of markets.
 
     Auto-detects whether markets have subtitles (event outcomes like player/team names).
     If they do: shows Outcome + Title columns.
     If they don't: shows Title + Yes/No/Volume columns.
+    If numbered=True, adds a # column for drill-down (1, 2, 3, ...).
     """
-    has_subtitles = any(
-        m.get("yes_sub_title") or m.get("no_sub_title") for m in markets
+    # Detect whether markets need an Outcome column:
+    # 1. Real subtitles (not generic yes/no) — multi-outcome markets like Olympics
+    # 2. Ticker-derived outcomes — range markets like Bitcoin price
+    has_real_subtitles = any(
+        (m.get("yes_sub_title") or m.get("no_sub_title") or "")
+        and not _is_generic_subtitle(m.get("yes_sub_title", "") or m.get("no_sub_title", ""))
+        for m in markets
     )
+    has_ticker_outcomes = (
+        not has_real_subtitles
+        and any(_outcome_from_ticker(m.get("ticker", "")) for m in markets)
+    )
+    has_subtitles = has_real_subtitles or has_ticker_outcomes
+
+    # Up/down markets get directional column labels
+    up_down = _is_up_down_market(markets)
+    yes_label = "Up ↑" if up_down else "Yes"
+    no_label = "Down ↓" if up_down else "No"
 
     t = Table(title=title, box=box.ROUNDED)
 
+    if numbered:
+        t.add_column("#", style="bold", justify="right", width=3)
     if has_subtitles:
         t.add_column("Outcome", max_width=30)
     t.add_column("Title", max_width=45)
     if show_expiry:
         t.add_column("Expires", style="yellow")
-    t.add_column("Yes", justify="right", style="green")
-    t.add_column("No", justify="right", style="red")
+    t.add_column(yes_label, justify="right", style="green")
+    t.add_column(no_label, justify="right", style="red")
     t.add_column("Volume", justify="right", style="dim")
 
-    for m in markets:
+    for i, m in enumerate(markets, 1):
         expiry = fmt_expiry(m.get("expiration_time") or m.get("close_time")) if show_expiry else None
         yes = fmt_price(m.get("yes_bid_dollars"))
         no = fmt_price(m.get("no_bid_dollars"))
         vol = fmt_dollars(m.get("volume_fp", 0))
 
-        if has_subtitles:
-            row = [_outcome_column(m), _title_column(m)]
+        if numbered:
+            row = [str(i)]
         else:
-            row = [_title_column(m)]
+            row = []
+        if has_subtitles:
+            outcome = _outcome_column(m)
+            if up_down:
+                outcome = _clean_up_down_outcome(outcome)
+            row.extend([outcome, _title_column(m)])
+        else:
+            row.append(_title_column(m))
         if show_expiry:
             row.append(expiry)
         row.extend([yes, no, vol])
@@ -512,7 +630,9 @@ def display_series_list(
                     if expiring:
                         ms = sort_by_expiry(ms)
                     if ms:
-                        console.print(market_table(ms[:limit], title=selected.get("title", ticker), show_expiry=expiring))
+                        console.print(market_table(ms[:limit], title=selected.get("title", ticker), show_expiry=expiring, numbered=True))
+                        if not _prompt_market_drill_down(ms, limit):
+                            return
                     else:
                         console.print("[dim]No open markets in this series[/dim]")
                 except ApiError as e:
@@ -764,7 +884,9 @@ def series(
                     if expiring:
                         ms = sort_by_expiry(ms)
                     if ms:
-                        console.print(market_table(ms[:20], title=selected.get("title", ticker), show_expiry=expiring))
+                        console.print(market_table(ms[:20], title=selected.get("title", ticker), show_expiry=expiring, numbered=True))
+                        if not _prompt_market_drill_down(ms, 20):
+                            return
                     else:
                         console.print("[dim]No open markets in this series[/dim]")
                 except ApiError as e:
@@ -775,15 +897,8 @@ def series(
             console.print(f"[red]Enter a number or 'q'[/red]")
 
 
-@app.command()
-def detail(ticker: str = typer.Argument(help="Market ticker (e.g. KXWO-GOLD-26-NOR)")):
-    """Show detailed info for a single market"""
-    try:
-        data = api("GET", "markets/" + ticker.upper())
-    except ApiError as e:
-        handle_api_error(e)
-    m = data.get("market", data)
-
+def _show_market_detail_panel(m: dict):
+    """Render the market detail Panel (shared by detail command and drill-down)."""
     console.print()
     console.print(Panel(
         f"[bold]{m.get('title', 'N/A')}[/bold]\n\n"
@@ -802,6 +917,47 @@ def detail(ticker: str = typer.Argument(help="Market ticker (e.g. KXWO-GOLD-26-N
         title="Market Detail",
         border_style="blue",
     ))
+
+
+def _prompt_market_drill_down(ms: list, limit: int) -> bool:
+    """Let user pick a market # to see detail. Returns True for 'b' (back), False for 'q' (quit)."""
+    n = min(len(ms), limit)
+    while True:
+        console.print()
+        choice = console.input(
+            f"[dim]Enter market # (1-{n}) for detail, b back to series list, q quit:[/dim] "
+        ).strip().lower()
+        if not choice or choice == "q":
+            return False
+        if choice == "b":
+            return True
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < n:
+                m = ms[idx]
+                ticker = m.get("ticker", "") or m.get("market_ticker", "")
+                if not ticker:
+                    console.print("[red]No ticker for this market[/red]")
+                    continue
+                try:
+                    data = api("GET", "markets/" + ticker.upper())
+                    _show_market_detail_panel(data.get("market", data))
+                except ApiError as e:
+                    console.print(f"[red]Error:[/red] {e}")
+            else:
+                console.print(f"[red]Pick 1-{n}[/red]")
+        except ValueError:
+            console.print("[red]Enter a number, b, or q[/red]")
+
+
+@app.command()
+def detail(ticker: str = typer.Argument(help="Market ticker (e.g. KXWO-GOLD-26-NOR)")):
+    """Show detailed info for a single market"""
+    try:
+        data = api("GET", "markets/" + ticker.upper())
+    except ApiError as e:
+        handle_api_error(e)
+    _show_market_detail_panel(data.get("market", data))
 
 
 @app.command()
@@ -857,8 +1013,87 @@ def balance():
     console.print(f"\n[bold]Balance:[/bold] ${b:.2f}\n")
 
 
+def _position_outcome_label(p: dict) -> str:
+    """Derive the best outcome label for a position.
+
+    Uses subtitle from the market API (fetched by _enrich_positions).
+    - Binary markets (subtitle name appears in title): plain Yes / No
+    - Multi-outcome markets (subtitle is a distinct pick): show the outcome name
+    """
+    pos = p.get("position", 0)
+    sub = (p.get("yes_sub_title", "") or p.get("no_sub_title", "") or "").strip()
+    title = (p.get("title", "") or "").strip()
+
+    # If subtitle is generic or empty, or the subtitle is already in the title
+    # (e.g. "Gavin Newsom" in "Will Gavin Newsom be..."), it's binary → Yes/No
+    is_binary = (
+        not sub
+        or _is_generic_subtitle(sub)
+        or sub.lower() in title.lower()
+    )
+
+    if pos < 0:
+        return "[red]No[/red]"
+
+    if is_binary:
+        return "[green]Yes[/green]"
+
+    # Multi-outcome: show the actual pick
+    return f"[green]{sub}[/green]"
+
+
+def _enrich_positions(ps: list) -> list:
+    """Fetch market details for each position to get title/subtitle/expiry/price.
+    Returns enriched position dicts with all fields needed for display.
+    """
+    enriched = []
+    for p in ps:
+        ticker = p.get("ticker", "")
+        merged = dict(p)
+        if ticker:
+            try:
+                data = api("GET", "markets/" + ticker)
+                m = data.get("market", data)
+                merged["title"] = m.get("title", "")
+                merged["yes_sub_title"] = m.get("yes_sub_title", "")
+                merged["no_sub_title"] = m.get("no_sub_title", "")
+                merged["expiration_time"] = m.get("expiration_time", "") or m.get("close_time", "")
+                merged["yes_bid_dollars"] = m.get("yes_bid_dollars")
+                merged["no_bid_dollars"] = m.get("no_bid_dollars")
+            except ApiError:
+                pass
+        enriched.append(merged)
+    return enriched
+
+
+def _position_return_pct(p: dict) -> str:
+    """Calculate unrealized return % for a position.
+    Return = (current_value - cost) / cost * 100
+    """
+    try:
+        pos = p.get("position", 0)
+        cost = float(p.get("total_traded_dollars", 0) or 0)
+        if cost <= 0:
+            return "—"
+        # Current value based on bid for the side we hold
+        if pos > 0:
+            price = float(p.get("yes_bid_dollars", 0) or 0)
+        else:
+            price = float(p.get("no_bid_dollars", 0) or 0)
+        current_value = abs(pos) * price
+        pnl = current_value - cost
+        pct = (pnl / cost) * 100
+        if pct >= 0:
+            return f"[green]+{pct:.0f}%[/green]"
+        return f"[red]{pct:.0f}%[/red]"
+    except (ValueError, TypeError, ZeroDivisionError):
+        return "—"
+
+
 @app.command()
-def positions():
+def positions(
+    expiring: bool = typer.Option(False, "--expiring", "-e", help="Sort by soonest expiry"),
+):
     """Show current positions"""
     try:
         data = api("GET", "portfolio/positions")
@@ -869,28 +1104,32 @@ def positions():
         console.print("[dim]No open positions[/dim]")
         raise typer.Exit()
 
+    with console.status("[dim]Loading position details...[/dim]"):
+        ps = _enrich_positions(ps)
+
+    if expiring:
+        ps.sort(key=lambda p: p.get("expiration_time", "") or "9999")
+
     t = Table(title="Current Positions", box=box.ROUNDED)
-    t.add_column("Ticker", style="cyan", max_width=28)
-    t.add_column("Side", max_width=20)
+    t.add_column("Title", max_width=40)
+    t.add_column("Side", max_width=25)
     t.add_column("Qty", justify="right")
     t.add_column("Exposure", justify="right", style="yellow")
+    t.add_column("Return", justify="right")
+    t.add_column("Expires", style="dim")
+    t.add_column("Ticker", style="cyan", max_width=28)
 
     for p in ps:
-        pos = p.get("position", 0)
-        side = _position_side_label(
-            p.get("yes_sub_title", "") or "",
-            p.get("no_sub_title", "") or "",
-            pos,
-            p.get("title", "")
-        )
-        side_str = "[green]Yes[/green]" if pos > 0 else "[red]No[/red]"
-        if side not in ("Yes", "No"):
-            side_str = side
+        title = _normalize_title(p.get("title", "") or "")
+        side_str = _position_outcome_label(p)
         t.add_row(
-            p.get("ticker", ""),
+            title,
             side_str,
-            str(abs(pos)),
+            str(abs(p.get("position", 0))),
             fmt_dollars(p.get("market_exposure_dollars", 0)),
+            _position_return_pct(p),
+            fmt_expiry(p.get("expiration_time", "")),
+            p.get("ticker", ""),
         )
     console.print(t)
 

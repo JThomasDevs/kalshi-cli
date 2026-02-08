@@ -7,7 +7,10 @@ Built with Python, [Typer](https://typer.tiangolo.com/), and [Rich](https://rich
 ## Features
 
 - **Smart search** — find markets by keyword, category, tag, or ticker with multi-strategy matching
-- **Interactive drill-down** — browse series as numbered lists, pick one to load its markets inline
+- **Interactive drill-down** — browse series → markets → market detail without re-running commands
+- **Smart outcome labels** — shows real outcome names (e.g. "Norway", "Trump", "$79,500 or above") instead of raw tickers
+- **Up/down markets** — Yes/No columns become "Up ↑" / "Down ↓" for price direction markets
+- **Enriched positions** — fetches market details to show titles, outcome picks, return %, and expiry
 - **Live orderbook** — view bid/ask depth for any market
 - **Trade with confirmation** — buy/sell with cost summaries and confirmation prompts
 - **Expiry sorting** — prioritize markets expiring soonest with `-e`
@@ -103,7 +106,7 @@ Search uses a multi-strategy approach:
 2. **Series matching** — searches series titles, categories, and tags dynamically
 3. **Market title fallback** — searches open market titles if nothing else matches
 
-When many series match, an interactive numbered list is displayed — enter a number to drill into that series.
+When many series match, an interactive numbered list is displayed — enter a number to drill into that series. Markets are also numbered for a second-level drill-down to market detail.
 
 ### Market Details
 
@@ -118,9 +121,10 @@ kalshi orderbook KXWO-GOLD-26-NOR
 ### Portfolio
 
 ```bash
-kalshi balance        # account balance
-kalshi positions      # current positions
-kalshi orders         # open/resting orders
+kalshi balance            # account balance
+kalshi positions          # current positions with titles, return %, expiry
+kalshi positions -e       # sort positions by soonest expiry
+kalshi orders             # open/resting orders
 ```
 
 ### Trading
@@ -153,6 +157,16 @@ kalshi cancel <order-id>
 | `--force` | `-f` | Skip trade confirmation | off |
 | `--status` | `-s` | Filter markets by status | open |
 | `--all` | `-a` | Include inactive series (series cmd) | off |
+
+## Market Display
+
+Market tables auto-detect the type of market:
+
+- **Multi-outcome** (Olympics, IPO, mentions): Outcome column shows the pick (e.g. "Norway", "Trump")
+- **Range** (Bitcoin price): Outcome shows the range (e.g. "$79,500 or above")
+- **Up/down** (15-min price): Columns labeled "Up ↑" / "Down ↓" with target price
+- **Binary** (Will X happen?): Standard Yes/No columns
+- **Parlay**: Legs shown on separate lines
 
 ## Notes
 
