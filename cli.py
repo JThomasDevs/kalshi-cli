@@ -313,17 +313,15 @@ def market_table(markets: list, title: str = "Markets", show_expiry: bool = Fals
     t.add_column("Volume", justify="right", style="dim")
 
     for m in markets:
-        row_title = m.get("title", "")
         expiry = fmt_expiry(m.get("expiration_time") or m.get("close_time")) if show_expiry else None
         yes = fmt_price(m.get("yes_bid_dollars"))
         no = fmt_price(m.get("no_bid_dollars"))
         vol = fmt_dollars(m.get("volume_fp", 0))
 
         if has_subtitles:
-            outcome = m.get("yes_sub_title", "") or m.get("no_sub_title", "") or ""
-            row = [outcome, row_title]
+            row = [_outcome_column(m), _title_column(m)]
         else:
-            row = [row_title]
+            row = [_title_column(m)]
         if show_expiry:
             row.append(expiry)
         row.extend([yes, no, vol])
