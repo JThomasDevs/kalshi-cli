@@ -1121,8 +1121,9 @@ def positions(
     t.add_column("Title", max_width=40)
     t.add_column("Side", max_width=25)
     t.add_column("Qty", justify="right")
-    t.add_column("Exposure", justify="right", style="yellow")
+    t.add_column("Cost", justify="right")
     t.add_column("Value", justify="right")
+    t.add_column("Exposure", justify="right", style="yellow")
     t.add_column("Return", justify="right")
     t.add_column("Expires", style="dim")
     t.add_column("Ticker", style="cyan", max_width=28)
@@ -1134,8 +1135,9 @@ def positions(
             title,
             side_str,
             str(abs(p.get("position", 0))),
-            fmt_dollars(p.get("market_exposure_dollars", 0)),
+            fmt_dollars(p.get("total_traded_dollars", 0)),
             fmt_dollars(_position_current_value(p)),
+            fmt_dollars(p.get("market_exposure_dollars", 0)),
             _position_return_pct(p),
             fmt_expiry(p.get("expiration_time", "")),
             p.get("ticker", ""),
