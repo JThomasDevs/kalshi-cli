@@ -224,12 +224,15 @@ def _fmt_legs(text: str) -> str:
 
 
 def _is_binary_yes_no_market(title: str) -> bool:
-    """True if the market is a single yes/no proposition (e.g. 'Will Gavin Newsom be...') not a multi-outcome pick."""
+    """True if the market is a single yes/no proposition (e.g. 'Will Gavin Newsom be...' or 'Team X wins by over 2.5 points') not a multi-outcome pick."""
     if not title:
         return False
     t = title.strip().lower()
     # "Will [X] be/have/win..." = one proposition → binary
     if t.startswith("will ") and (" be " in t or " win " in t or " have " in t or " the " in t):
+        return True
+    # Spread markets: "Team wins by over X points" = binary
+    if "wins by over" in t and "points" in t:
         return True
     return False
 
@@ -315,15 +318,24 @@ def _is_parlay_subtitle(sub: str) -> bool:
 
 
 def _outcome_column(m: dict) -> str:
-    """Outcome column: for parlays, yes/no per line; for single-outcome markets, the outcome name.
-
-    Priority:
-    1. Subtitle (yes_sub_title / no_sub_title) — if it's a real label, not generic "yes"/"no"
-       e.g. "Trump", "Norway", "$79,500 or above"
-    2. Strike / ticker-derived label — range markets
-    3. Fallback "Yes"
+    """Outcome column: for binary Yes/No markets, color YES green or NO red based on higher %.
+    For multi-outcome markets: returns the outcome name.
+    For parlays: returns yes/no per leg.
     """
-    # 1. Try subtitle first (mention markets, Olympics, range markets, multi-outcome)
+    title = m.get("title", "") or ""
+
+    # Binary Yes/No markets: show YES or NO based on higher percentage
+    if _is_binary_yes_no_market(title):
+        yes_price = float(m.get("yes_bid_dollars", 0) or 0)
+        no_price = float(m.get("no_bid_dollars", 0) or 0)
+        if yes_price > no_price:
+            return "[green]YES[/green]"
+        elif no_price > yes_price:
+            return "[red]NO[/red]"
+        else:
+            return "YES"
+
+    # Try subtitle (for multi-outcome markets like Olympics, player props)
     sub = m.get("yes_sub_title", "") or m.get("no_sub_title", "") or ""
     if sub and not _is_generic_subtitle(sub):
         if _is_parlay_subtitle(sub):
@@ -332,7 +344,8 @@ def _outcome_column(m: dict) -> str:
             return "\n".join(_parse_leg(p)[0] for p in parts)
         # Single outcome: strip "Yes "/"No " prefix if present
         return _parse_leg(sub.strip())[1]
-    # 2. Fall back to strike/range from API or ticker
+
+    # Fall back to strike/range from API or ticker
     out = m.get("strike") or m.get("strike_price") or m.get("resolution_value")
     if out is not None and str(out).strip():
         return str(out).strip()
@@ -397,13 +410,15 @@ def market_table(markets: list, title: str = "Markets", show_expiry: bool = Fals
     has_real_subtitles = any(
         (m.get("yes_sub_title") or m.get("no_sub_title") or "")
         and not _is_generic_subtitle(m.get("yes_sub_title", "") or m.get("no_sub_title", ""))
+        and not _is_binary_yes_no_market(m.get("title", ""))
         for m in markets
     )
     has_ticker_outcomes = (
         not has_real_subtitles
         and any(_outcome_from_ticker(m.get("ticker", "")) for m in markets)
     )
-    has_subtitles = has_real_subtitles or has_ticker_outcomes
+    has_binary_outcomes = any(_is_binary_yes_no_market(m.get("title", "")) for m in markets)
+    has_subtitles = has_real_subtitles or has_ticker_outcomes or has_binary_outcomes
 
     # Up/down markets get directional column labels
     up_down = _is_up_down_market(markets)
@@ -415,13 +430,14 @@ def market_table(markets: list, title: str = "Markets", show_expiry: bool = Fals
     if numbered:
         t.add_column("#", style="bold", justify="right", width=3)
     if has_subtitles:
-        t.add_column("Outcome", max_width=30)
+        t.add_column("Prediction", max_width=30)
     t.add_column("Title", max_width=45)
     if show_expiry:
         t.add_column("Expires", style="yellow")
     t.add_column(yes_label, justify="right", style="green")
     t.add_column(no_label, justify="right", style="red")
     t.add_column("Volume", justify="right", style="dim")
+    t.add_column("Ticker", style="cyan", overflow="fold")
 
     for i, m in enumerate(markets, 1):
         expiry = fmt_expiry(m.get("expiration_time") or m.get("close_time")) if show_expiry else None
@@ -442,7 +458,7 @@ def market_table(markets: list, title: str = "Markets", show_expiry: bool = Fals
             row.append(_title_column(m))
         if show_expiry:
             row.append(expiry)
-        row.extend([yes, no, vol])
+        row.extend([yes, no, vol, m.get("ticker", "")])
         t.add_row(*row)
     return t
 
@@ -597,7 +613,7 @@ def display_series_list(
 
     t = Table(title=f"'{query}' — {len(series_list)} series", box=box.ROUNDED)
     t.add_column("#", style="bold", justify="right", width=3)
-    t.add_column("Ticker", style="cyan")
+    t.add_column("Ticker", style="cyan", overflow="fold")
     t.add_column("Title", max_width=50)
     if expiring:
         t.add_column("Soonest", style="yellow")
@@ -693,16 +709,57 @@ def handle_api_error(e: ApiError):
 def markets(
     limit: int = typer.Option(20, "--limit", "-l", help="Number of markets to show"),
     status: str = typer.Option("open", "--status", "-s", help="Filter by status (open, closed, settled)"),
+    no_parlays: bool = typer.Option(False, "--no-parlays", help="Exclude parlay/multi-leg markets"),
+    all_markets: bool = typer.Option(False, "--all", "-a", help="Show all markets instead of just recently traded ones"),
 ):
-    """List markets on Kalshi"""
-    try:
-        data = api("GET", f"markets?limit={limit}&status={status}")
-    except ApiError as e:
-        handle_api_error(e)
-    ms = data.get("markets", [])
+    """List markets on Kalshi (defaults to most recently traded)"""
+    ms = []
+
+    if not all_markets:
+        with console.status("[dim]Loading active markets from recent trades...[/dim]"):
+            try:
+                trades_data = api("GET", "markets/trades?limit=500")
+                trades = trades_data.get("trades", [])
+            except ApiError:
+                trades = []
+
+            # Get unique tickers from trades
+            seen = set()
+            for t in trades:
+                ticker = t.get("ticker", "")
+                if ticker:
+                    seen.add(ticker)
+
+            # Batch fetch all markets at once
+            if seen:
+                tickers_str = ",".join(list(seen)[:100])  # API limit
+                try:
+                    data = api("GET", f"markets?tickers={tickers_str}&status={status}")
+                    ms = data.get("markets", [])
+                except ApiError:
+                    ms = []
+    else:
+        try:
+            data = api("GET", f"markets?limit=200&status={status}")
+            ms = data.get("markets", [])
+        except ApiError as e:
+            handle_api_error(e)
+
     if not ms:
         console.print("[dim]No markets found[/dim]")
         raise typer.Exit()
+
+    # Filter out parlays if requested
+    if no_parlays:
+        ms = [m for m in ms if not is_parlay(m)]
+
+    # Sort by volume descending
+    def sort_key(m):
+        vol = float(m.get("volume_fp", 0) or 0)
+        return vol
+    ms.sort(key=sort_key, reverse=True)
+    ms = ms[:limit]
+
     console.print(market_table(ms, title=f"Kalshi Markets ({status}, top {len(ms)})"))
 
 
@@ -850,7 +907,7 @@ def series(
 
     t = Table(title=f"Series ({len(matching)})", box=box.ROUNDED)
     t.add_column("#", style="bold", justify="right", width=3)
-    t.add_column("Ticker", style="cyan")
+    t.add_column("Ticker", style="cyan", overflow="fold")
     t.add_column("Title", max_width=50)
     if expiring:
         t.add_column("Soonest", style="yellow")
@@ -1107,6 +1164,8 @@ def positions(
     except ApiError as e:
         handle_api_error(e)
     ps = data.get("market_positions", [])
+    # Filter out closed positions (0 qty)
+    ps = [p for p in ps if p.get("position", 0) != 0]
     if not ps:
         console.print("[dim]No open positions[/dim]")
         raise typer.Exit()
@@ -1121,22 +1180,36 @@ def positions(
     t.add_column("Title", max_width=40)
     t.add_column("Side", max_width=25)
     t.add_column("Qty", justify="right")
-    t.add_column("Cost", justify="right", style="yellow")
-    t.add_column("Value", justify="right")
+    t.add_column("Cost/Sh", justify="right", style="yellow")
+    t.add_column("Val/Sh", justify="right")
     t.add_column("Return", justify="right")
+    t.add_column("Value", justify="right")
     t.add_column("Expires", style="dim")
-    t.add_column("Ticker", style="cyan", max_width=28)
+    t.add_column("Ticker", style="cyan", overflow="fold")
 
     for p in ps:
         title = _normalize_title(p.get("title", "") or "")
         side_str = _position_outcome_label(p)
+        qty = abs(p.get("position", 0))
+        total_cost = float(p.get("total_traded_dollars", 0) or 0)
+        cost_per_share = (total_cost / qty) if qty > 0 else 0
+
+        # Current value per share
+        if p.get("position", 0) > 0:
+            val_per_share = float(p.get("yes_bid_dollars", 0) or 0)
+        else:
+            val_per_share = float(p.get("no_bid_dollars", 0) or 0)
+
+        current_value = _position_current_value(p)
+
         t.add_row(
             title,
             side_str,
-            str(abs(p.get("position", 0))),
-            fmt_dollars(p.get("total_traded_dollars", 0)),
-            fmt_dollars(_position_current_value(p)),
+            str(qty),
+            f"${cost_per_share:.2f}" if cost_per_share > 0 else "—",
+            f"${val_per_share:.2f}" if val_per_share > 0 else "—",
             _position_return_pct(p),
+            fmt_dollars(current_value),
             fmt_expiry(p.get("expiration_time", "")),
             p.get("ticker", ""),
         )
@@ -1156,8 +1229,8 @@ def orders():
         raise typer.Exit()
 
     t = Table(title="Open Orders", box=box.ROUNDED)
-    t.add_column("Order ID", style="dim", max_width=14)
-    t.add_column("Ticker", style="cyan")
+    t.add_column("Order ID", style="dim")
+    t.add_column("Ticker", style="cyan", overflow="fold")
     t.add_column("Action")
     t.add_column("Side", justify="center")
     t.add_column("Price", justify="right")
