@@ -1,0 +1,31 @@
+#!/usr/bin/env node
+
+const { spawn } = require('child_process');
+const path = require('path');
+const os = require('os');
+
+const CLI_DIR = path.join(os.homedir(), '.local', 'share', 'kalshi-cli');
+const VENV_PYTHON = path.join(CLI_DIR, '.venv', 'bin', 'python');
+const CLI_PYTHON = path.join(CLI_DIR, 'cli.py');
+
+const args = process.argv.slice(2);
+
+// Find Python executable
+function getPython() {
+  // Try venv first
+  if (require('fs').existsSync(VENV_PYTHON)) {
+    return VENV_PYTHON;
+  }
+  // Fallback to system python3
+  return 'python3';
+}
+
+const python = getPython();
+const child = spawn(python, [CLI_PYTHON, ...args], {
+  stdio: 'inherit',
+  cwd: process.cwd()
+});
+
+child.on('exit', (code) => {
+  process.exit(code);
+});

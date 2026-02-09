@@ -1,0 +1,44 @@
+{
+  "name": "kalshi-cli",
+  "version": "1.2.4",
+  "description": "Interactive CLI for trading prediction markets on Kalshi",
+  "bin": {
+    "kalshi": "./bin/kalshi"
+  },
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  },
+  "keywords": [
+    "kalshi",
+    "prediction-markets",
+    "trading",
+    "cli",
+    "markets",
+    "finance",
+    "betting"
+  ],
+  "author": "Jonathan Thomas (https://github.com/JThomasDevs)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JThomasDevs/kalshi-cli.git"
+  },
+  "homepage": "https://github.com/JThomasDevs/kalshi-cli#readme",
+  "bugs": {
+    "url": "https://github.com/JThomasDevs/kalshi-cli/issues"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "files": [
+    "bin/",
+    "postinstall.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {}
+}

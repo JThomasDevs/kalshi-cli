@@ -1,0 +1,17 @@
+# Python source (cloned from GitHub at install time via postinstall)
+cli.py
+pyproject.toml
+requirements.txt
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Dev/config
+.git/
+.gitignore
+.env
+*.pem
+.DS_Store
+_meta.json
+node_modules/
