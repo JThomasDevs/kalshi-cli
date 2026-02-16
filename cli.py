@@ -1021,43 +1021,144 @@ def detail(ticker: str = typer.Argument(help="Market ticker (e.g. KXWO-GOLD-26-N
     _show_market_detail_panel(data.get("market", data))
 
 
-@app.command()
-def orderbook(ticker: str = typer.Argument(help="Market ticker")):
-    """Show the orderbook for a market"""
+def _orderbook_levels_to_rows(levels: list, in_dollars: bool) -> list[tuple[str, str]]:
+    """Convert API orderbook levels to (price_cent_str, quantity_str) rows.
+    levels: from 'yes'/'no' (legacy [cents, count]) or 'yes_dollars'/'no_dollars' ([dollars_str, count_str]).
+    """
+    rows = []
+    for level in levels or []:
+        if isinstance(level, (list, tuple)) and len(level) >= 2:
+            price_val, size_val = level[0], level[1]
+            if in_dollars:
+                try:
+                    price_cents = int(round(float(price_val) * 100))
+                except (TypeError, ValueError):
+                    price_cents = 0
+                size_str = str(size_val).rstrip("0").rstrip(".") if size_val else "0"
+            else:
+                price_cents = int(price_val) if price_val is not None else 0
+                size_str = str(int(size_val)) if size_val else "0"
+            if size_val and float(size_val) != 0:
+                rows.append((f"{price_cents}¢", size_str))
+        elif isinstance(level, dict):
+            price = level.get("price") or level.get("yes_price") or level.get("no_price") or 0
+            size = level.get("count") or level.get("remaining_count") or level.get("quantity") or 0
+            if size and size != 0:
+                rows.append((f"{price}¢", str(size)))
+    return rows
+
+
+def _orderbook_is_empty(data: dict) -> bool:
+    """True if the orderbook response has no bid levels on either side."""
+    fp = data.get("orderbook_fp") or {}
+    legacy = data.get("orderbook") or {}
+    yes_fp = fp.get("yes_dollars") or []
+    no_fp = fp.get("no_dollars") or []
+    yes_legacy = legacy.get("yes") or []
+    no_legacy = legacy.get("no") or []
+    return (not yes_fp and not no_fp and not yes_legacy and not no_legacy)
+
+
+def _orderbook_series_error(series_ticker: str, example_tickers: list[str]) -> None:
+    """Print an error when user passed a series ticker but orderbook requires a market ticker."""
+    console.print("[red]Error:[/red] Orderbook requires a [bold]market ticker[/bold], not a series ticker.")
+    console.print(f"  [cyan]{series_ticker}[/cyan] is a series; each market in the series has its own ticker.")
+    if example_tickers:
+        examples = ", ".join(example_tickers[:3])
+        console.print(f"  Use a specific market ticker, e.g.: [bold]{examples}[/bold]")
+        console.print("  Run [bold]kalshi search " + series_ticker + "[/bold] to list markets and their tickers.")
+    else:
+        console.print("  This series has no open markets, or the ticker was not found.")
+    console.print()
+
+
+def _get_open_markets_for_series(series_ticker: str, limit: int = 10) -> list[dict]:
+    """Return list of open markets for the given series ticker (empty on error or not a series)."""
     try:
-        data = api("GET", f"markets/{ticker.upper()}/orderbook")
+        r = api("GET", f"markets?series_ticker={series_ticker.upper()}&status=open&limit={limit}")
+        return r.get("markets") or []
+    except (ApiError, typer.Exit):
+        return []
+
+
+def _resolve_series_to_single_market(series_ticker: str) -> tuple[str | None, list[str]]:
+    """If series has exactly one open market, return (that_ticker, []). Else return (None, example_tickers)."""
+    markets = _get_open_markets_for_series(series_ticker, limit=5)
+    tickers = [m["ticker"] for m in markets if m.get("ticker")]
+    if len(tickers) == 1:
+        return (tickers[0], [])
+    return (None, tickers)
+
+
+@app.command()
+def orderbook(
+    ticker: str = typer.Argument(help="Market ticker (use a specific market, not a series, when multiple exist)"),
+    raw: bool = typer.Option(False, "--raw", help="Print raw API response JSON"),
+):
+    """Show the orderbook for a market. With a series that has exactly one active market, shows that market's orderbook."""
+    ticker = ticker.upper()
+    try:
+        data = api("GET", f"markets/{ticker}/orderbook")
     except ApiError as e:
-        handle_api_error(e)
-    ob = data.get("orderbook_fp") or data.get("orderbook", data)
+        if e.status_code == 404:
+            single, examples = _resolve_series_to_single_market(ticker)
+            if single:
+                ticker = single
+                data = api("GET", f"markets/{ticker}/orderbook")
+                console.print(f"[dim]Resolved series to market: [cyan]{ticker}[/cyan][/dim]\n")
+            else:
+                _orderbook_series_error(ticker, examples)
+                raise typer.Exit(1)
+        else:
+            handle_api_error(e)
+
+    if raw:
+        import json
+        console.print(json.dumps(data, indent=2))
+        return
+
+    # If orderbook came back empty, ticker might be a series — API sometimes returns 200 with nulls
+    if _orderbook_is_empty(data):
+        single, examples = _resolve_series_to_single_market(ticker)
+        if single:
+            ticker = single
+            data = api("GET", f"markets/{ticker}/orderbook")
+            console.print(f"[dim]Resolved series to market: [cyan]{ticker}[/cyan][/dim]\n")
+        elif examples or _get_open_markets_for_series(ticker, limit=1):
+            _orderbook_series_error(ticker, examples or [])
+            raise typer.Exit(1)
+
+    # API returns orderbook_fp (yes_dollars / no_dollars) and legacy orderbook (yes / no); any can be null
+    fp = data.get("orderbook_fp") or {}
+    legacy = data.get("orderbook") or {}
+    if fp.get("yes_dollars") is not None or fp.get("no_dollars") is not None:
+        yes_levels = fp.get("yes_dollars") or []
+        no_levels = fp.get("no_dollars") or []
+        in_dollars = True
+    else:
+        yes_levels = legacy.get("yes") or []
+        no_levels = legacy.get("no") or []
+        in_dollars = False
 
     console.print()
 
-    # Yes side
-    yes_table = Table(title=f"{ticker.upper()} — YES", box=box.SIMPLE, style="green")
+    yes_table = Table(title=f"{ticker} — YES", box=box.SIMPLE, style="green")
     yes_table.add_column("Price", justify="right")
     yes_table.add_column("Quantity", justify="right")
-    for level in ob.get("yes", []):
-        # API may return [price, qty] arrays or {price, count, quantity} dicts (legacy vs fixed-point)
-        if isinstance(level, (list, tuple)):
-            price, size = level[0], level[1] if len(level) > 1 else 0
-        else:
-            price = level.get("price") or level.get("yes_price") or 0
-            size = level.get("count") or level.get("remaining_count") or level.get("quantity") or 0
-        if size and size != 0:
-            yes_table.add_row(f"{price}¢", str(size))
+    yes_rows = _orderbook_levels_to_rows(yes_levels, in_dollars)
+    if not yes_rows:
+        yes_table.add_row("—", "no bids")
+    for price_str, qty_str in yes_rows:
+        yes_table.add_row(price_str, qty_str)
 
-    # No side
-    no_table = Table(title=f"{ticker.upper()} — NO", box=box.SIMPLE, style="red")
+    no_table = Table(title=f"{ticker} — NO", box=box.SIMPLE, style="red")
     no_table.add_column("Price", justify="right")
     no_table.add_column("Quantity", justify="right")
-    for level in ob.get("no", []):
-        if isinstance(level, (list, tuple)):
-            price, size = level[0], level[1] if len(level) > 1 else 0
-        else:
-            price = level.get("price") or level.get("no_price") or 0
-            size = level.get("count") or level.get("remaining_count") or level.get("quantity") or 0
-        if size and size != 0:
-            no_table.add_row(f"{price}¢", str(size))
+    no_rows = _orderbook_levels_to_rows(no_levels, in_dollars)
+    if not no_rows:
+        no_table.add_row("—", "no bids")
+    for price_str, qty_str in no_rows:
+        no_table.add_row(price_str, qty_str)
 
     console.print(yes_table)
     console.print(no_table)
