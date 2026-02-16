@@ -1,9 +1,9 @@
 {
   "name": "kalshi-cli",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "description": "Interactive CLI for trading prediction markets on Kalshi",
   "bin": {
-    "kalshi": "./bin/kalshi"
+    "kalshi": "bin/kalshi"
   },
   "scripts": {
     "postinstall": "node postinstall.js"
