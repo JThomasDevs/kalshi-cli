@@ -11,6 +11,7 @@ import typer
 from rich.table import Table
 from rich.console import Console
 from rich.panel import Panel
+from rich.columns import Columns
 from rich import box
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -160,6 +161,61 @@ def filter_by_min_odds(markets: list, min_odds: float) -> list:
     return filtered
 
 
+def _parse_expiry_from_ticker(ticker: str):
+    """If ticker has segment like 26FEB161745 (DDMMMHHMMSS), return ISO ts in UTC.
+    For 15M/5M series the segment is window start; add 15 or 5 minutes for close time.
+    """
+    import re
+    from datetime import datetime, timezone, timedelta
+    if not ticker or "-" not in ticker:
+        return None
+    parts = ticker.split("-")
+    for part in parts:
+        if len(part) == 11 and re.match(r"\d{2}[A-Z]{3}\d{6}$", part):
+            try:
+                day = int(part[:2])
+                mon = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+                       "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}.get(part[2:5])
+                if not mon:
+                    continue
+                h, mi, s = int(part[5:7]), int(part[7:9]), int(part[9:11])
+                now = datetime.now(timezone.utc)
+                year = now.year
+                dt = datetime(year, mon, day, h, mi, s, tzinfo=timezone.utc)
+                if dt <= now:
+                    year += 1
+                    dt = datetime(year, mon, day, h, mi, s, tzinfo=timezone.utc)
+                # 15m/5m markets: ticker time is window start, close = start + window
+                ticker_upper = ticker.upper()
+                if "15M" in ticker_upper:
+                    dt = dt + timedelta(minutes=15)
+                elif "5M" in ticker_upper:
+                    dt = dt + timedelta(minutes=5)
+                return dt.isoformat()
+            except (ValueError, KeyError):
+                pass
+    return None
+
+
+def _market_expiry_ts(m: dict) -> str:
+    """Best expiry timestamp: API fields first, then parsed from ticker for 15m-style markets."""
+    ts = (
+        m.get("expected_expiration_time")
+        or m.get("close_time")
+        or m.get("expiration_time")
+        or m.get("latest_expiration_time")
+        or ""
+    )
+    if ts:
+        return ts
+    ticker = m.get("ticker", "")
+    if ticker and ("15M" in ticker.upper() or "5M" in ticker.upper()):
+        parsed = _parse_expiry_from_ticker(ticker)
+        if parsed:
+            return parsed
+    return ""
+
+
 def sort_by_expiry(markets: list) -> list:
     """Filter out expired markets, then sort by expiration ascending (soonest first).
     Markets without an expiration are pushed to the end.
@@ -169,13 +225,13 @@ def sort_by_expiry(markets: list) -> list:
 
     future = []
     for m in markets:
-        exp = m.get("expiration_time") or m.get("close_time") or ""
+        exp = _market_expiry_ts(m)
         if exp and exp < now:
             continue  # skip expired
         future.append(m)
 
     def key(m):
-        exp = m.get("expiration_time") or m.get("close_time") or ""
+        exp = _market_expiry_ts(m)
         return exp if exp else "9999"
     return sorted(future, key=key)
 
@@ -444,7 +500,7 @@ def market_table(markets: list, title: str = "Markets", show_expiry: bool = Fals
     t.add_column("Ticker", style="cyan", overflow="fold")
 
     for i, m in enumerate(markets, 1):
-        expiry = fmt_expiry(m.get("expiration_time") or m.get("close_time")) if show_expiry else None
+        expiry = fmt_expiry(_market_expiry_ts(m)) if show_expiry else None
         yes = fmt_price(m.get("yes_bid_dollars"))
         no = fmt_price(m.get("no_bid_dollars"))
         vol = fmt_dollars(m.get("volume_fp", 0))
@@ -548,7 +604,7 @@ def get_active_series_tickers() -> dict:
                 # Check nested markets for close times
                 nested = e.get("markets") or []
                 for m in nested:
-                    exp = m.get("close_time") or m.get("expiration_time") or ""
+                    exp = _market_expiry_ts(m)
                     if exp and (not active.get(st) or exp < active[st]):
                         active[st] = exp
                 # Ensure series appears even if no nested markets returned
@@ -786,7 +842,7 @@ def search(
 
     # ── Strategy 1: Direct ticker lookup (KX...) ──
     if query.upper().startswith("KX"):
-        # Try as market ticker
+        # Try as market ticker (full ticker has hyphens, e.g. KXBTC15M-26FEB161715-15)
         if "-" in query:
             try:
                 data = api("GET", "markets/" + query.upper())
@@ -797,21 +853,22 @@ def search(
             except ApiError:
                 pass
 
-        # Try as event ticker
-        try:
-            ed = api("GET", "events/" + query.upper() + "?with_nested_markets=true")
-            if ed.get("event") and ed.get("markets"):
-                display_event(ed, limit=limit, min_odds=min_odds, expiring=expiring)
-                return
-        except ApiError:
-            pass
-
-        # Try as series ticker — fetch markets directly
+        # Try as series ticker first when query has no hyphen (e.g. KXBTC15M)
+        # so we get real market close times; event API often returns container event with wrong expiry
         try:
             data = api("GET", f"markets?series_ticker={query.upper()}&status=open&limit=200")
             ms = apply_filters(data.get("markets", []))
             if ms:
                 console.print(market_table(ms[:limit], title=f"Series: {query.upper()}", show_expiry=expiring))
+                return
+        except ApiError:
+            pass
+
+        # Try as event ticker (e.g. full event id)
+        try:
+            ed = api("GET", "events/" + query.upper() + "?with_nested_markets=true")
+            if ed.get("event") and ed.get("markets"):
+                display_event(ed, limit=limit, min_odds=min_odds, expiring=expiring)
                 return
         except ApiError:
             pass
@@ -972,7 +1029,7 @@ def _show_market_detail_panel(m: dict):
         f"  Last Price:    {fmt_price(m.get('last_price_dollars'))}\n"
         f"  Volume:        {fmt_dollars(m.get('volume_fp', 0))}\n"
         f"  Open Interest: {m.get('open_interest', 'N/A')}\n"
-        f"  Expiration:    {m.get('expiration_time', 'N/A')}\n"
+        f"  Expiration:    {_market_expiry_ts(m) or 'N/A'}\n"
         f"  Category:      {m.get('category', 'N/A')}\n"
         f"  Subtitle:      {m.get('yes_sub_title', '') or m.get('no_sub_title', '') or '—'}",
         title="Market Detail",
@@ -1019,6 +1076,22 @@ def detail(ticker: str = typer.Argument(help="Market ticker (e.g. KXWO-GOLD-26-N
     except ApiError as e:
         handle_api_error(e)
     _show_market_detail_panel(data.get("market", data))
+
+
+def _orderbook_best_bid_cents(levels: list, in_dollars: bool) -> int | None:
+    """Return the best (highest) bid price in cents, or None if no levels. Levels are ascending so last is best."""
+    if not levels:
+        return None
+    level = levels[-1]
+    if not isinstance(level, (list, tuple)) or len(level) < 1:
+        return None
+    price_val = level[0]
+    try:
+        if in_dollars:
+            return int(round(float(price_val) * 100))
+        return int(price_val)
+    except (TypeError, ValueError):
+        return None
 
 
 def _orderbook_levels_to_rows(levels: list, in_dollars: bool) -> list[tuple[str, str]]:
@@ -1141,27 +1214,41 @@ def orderbook(
         in_dollars = False
 
     console.print()
+    console.print(
+        "[dim]Showing [bold]bids[/bold] (buy orders) only. "
+        "Kalshi's API does not return sell orders; implied ask from the opposite side is shown below.[/dim]\n"
+    )
 
-    yes_table = Table(title=f"{ticker} — YES", box=box.SIMPLE, style="green")
+    yes_rows = _orderbook_levels_to_rows(yes_levels, in_dollars)
+    no_rows = _orderbook_levels_to_rows(no_levels, in_dollars)
+    best_yes = _orderbook_best_bid_cents(yes_levels, in_dollars)
+    best_no = _orderbook_best_bid_cents(no_levels, in_dollars)
+    implied_yes_ask = (100 - best_no) if best_no is not None else None
+    implied_no_ask = (100 - best_yes) if best_yes is not None else None
+
+    yes_title = f"{ticker} — YES (bids)"
+    if implied_yes_ask is not None:
+        yes_title += f"  · implied ask [dim]{implied_yes_ask}¢[/dim]"
+    yes_table = Table(title=yes_title, box=box.SIMPLE, style="green")
     yes_table.add_column("Price", justify="right")
     yes_table.add_column("Quantity", justify="right")
-    yes_rows = _orderbook_levels_to_rows(yes_levels, in_dollars)
     if not yes_rows:
         yes_table.add_row("—", "no bids")
     for price_str, qty_str in yes_rows:
         yes_table.add_row(price_str, qty_str)
 
-    no_table = Table(title=f"{ticker} — NO", box=box.SIMPLE, style="red")
+    no_title = f"{ticker} — NO (bids)"
+    if implied_no_ask is not None:
+        no_title += f"  · implied ask [dim]{implied_no_ask}¢[/dim]"
+    no_table = Table(title=no_title, box=box.SIMPLE, style="red")
     no_table.add_column("Price", justify="right")
     no_table.add_column("Quantity", justify="right")
-    no_rows = _orderbook_levels_to_rows(no_levels, in_dollars)
     if not no_rows:
         no_table.add_row("—", "no bids")
     for price_str, qty_str in no_rows:
         no_table.add_row(price_str, qty_str)
 
-    console.print(yes_table)
-    console.print(no_table)
+    console.print(Columns([yes_table, no_table], equal=True, expand=True))
 
 
 @app.command()
@@ -1219,7 +1306,7 @@ def _enrich_positions(ps: list) -> list:
                 merged["title"] = m.get("title", "")
                 merged["yes_sub_title"] = m.get("yes_sub_title", "")
                 merged["no_sub_title"] = m.get("no_sub_title", "")
-                merged["expiration_time"] = m.get("expiration_time", "") or m.get("close_time", "")
+                merged["expiration_time"] = _market_expiry_ts(m)
                 merged["yes_bid_dollars"] = m.get("yes_bid_dollars")
                 merged["no_bid_dollars"] = m.get("no_bid_dollars")
             except ApiError:
