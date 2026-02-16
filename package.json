@@ -1,6 +1,6 @@
 {
   "name": "kalshi-cli",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "Interactive CLI for trading prediction markets on Kalshi",
   "bin": {
     "kalshi": "bin/kalshi"
