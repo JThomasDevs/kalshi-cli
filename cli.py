@@ -99,16 +99,20 @@ def api(method: str, endpoint: str, body: dict = None) -> dict:
         "Content-Type": "application/json",
     }
     url = BASE_URL + path
+    timeout = 10
 
-    if method == "GET":
-        r = requests.get(url, headers=headers)
-    elif method == "POST":
-        r = requests.post(url, headers=headers, json=body)
-    elif method == "DELETE":
-        r = requests.delete(url, headers=headers)
-    else:
-        console.print(f"[red]Unsupported HTTP method:[/red] {method}")
-        raise typer.Exit(1)
+    try:
+        if method == "GET":
+            r = requests.get(url, headers=headers, timeout=timeout)
+        elif method == "POST":
+            r = requests.post(url, headers=headers, json=body, timeout=timeout)
+        elif method == "DELETE":
+            r = requests.delete(url, headers=headers, timeout=timeout)
+        else:
+            console.print(f"[red]Unsupported HTTP method:[/red] {method}")
+            raise typer.Exit(1)
+    except requests.exceptions.RequestException as e:
+        raise ApiError(0, f"Network error: {e}") from e
 
     if r.status_code not in (200, 201, 204):
         raise ApiError(r.status_code, r.text)
@@ -1024,7 +1028,7 @@ def orderbook(ticker: str = typer.Argument(help="Market ticker")):
         data = api("GET", f"markets/{ticker.upper()}/orderbook")
     except ApiError as e:
         handle_api_error(e)
-    ob = data.get("orderbook", data)
+    ob = data.get("orderbook_fp") or data.get("orderbook", data)
 
     console.print()
 
@@ -1033,14 +1037,14 @@ def orderbook(ticker: str = typer.Argument(help="Market ticker")):
     yes_table.add_column("Price", justify="right")
     yes_table.add_column("Quantity", justify="right")
     for level in ob.get("yes", []):
-        # API may return [price, qty] arrays or {price, quantity} dicts
+        # API may return [price, qty] arrays or {price, count, quantity} dicts (legacy vs fixed-point)
         if isinstance(level, (list, tuple)):
-            price, qty = level[0], level[1]
+            price, size = level[0], level[1] if len(level) > 1 else 0
         else:
-            price = level.get("price", level.get("yes_price", 0))
-            qty = level.get("quantity", 0)
-        if qty > 0:
-            yes_table.add_row(f"{price}¢", str(qty))
+            price = level.get("price") or level.get("yes_price") or 0
+            size = level.get("count") or level.get("remaining_count") or level.get("quantity") or 0
+        if size and size != 0:
+            yes_table.add_row(f"{price}¢", str(size))
 
     # No side
     no_table = Table(title=f"{ticker.upper()} — NO", box=box.SIMPLE, style="red")
@@ -1048,12 +1052,12 @@ def orderbook(ticker: str = typer.Argument(help="Market ticker")):
     no_table.add_column("Quantity", justify="right")
     for level in ob.get("no", []):
         if isinstance(level, (list, tuple)):
-            price, qty = level[0], level[1]
+            price, size = level[0], level[1] if len(level) > 1 else 0
         else:
-            price = level.get("price", level.get("no_price", 0))
-            qty = level.get("quantity", 0)
-        if qty > 0:
-            no_table.add_row(f"{price}¢", str(qty))
+            price = level.get("price") or level.get("no_price") or 0
+            size = level.get("count") or level.get("remaining_count") or level.get("quantity") or 0
+        if size and size != 0:
+            no_table.add_row(f"{price}¢", str(size))
 
     console.print(yes_table)
     console.print(no_table)
