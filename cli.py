@@ -1168,7 +1168,7 @@ def orderbook(
     ticker: str = typer.Argument(help="Market ticker (use a specific market, not a series, when multiple exist)"),
     raw: bool = typer.Option(False, "--raw", help="Print raw API response JSON"),
 ):
-    """Show the orderbook for a market. With a series that has exactly one active market, shows that market's orderbook."""
+    """Show the orderbook for a market with best bid AND ask. With a series that has exactly one active market, shows that market's orderbook."""
     ticker = ticker.upper()
     try:
         data = api("GET", f"markets/{ticker}/orderbook")
@@ -1190,7 +1190,7 @@ def orderbook(
         console.print(json.dumps(data, indent=2))
         return
 
-    # If orderbook came back empty, ticker might be a series — API sometimes returns 200 with nulls
+    # If orderbook came back empty, ticker might be a series
     if _orderbook_is_empty(data):
         single, examples = _resolve_series_to_single_market(ticker)
         if single:
@@ -1201,7 +1201,7 @@ def orderbook(
             _orderbook_series_error(ticker, examples or [])
             raise typer.Exit(1)
 
-    # API returns orderbook_fp (yes_dollars / no_dollars) and legacy orderbook (yes / no); any can be null
+    # Get orderbook data (bids only)
     fp = data.get("orderbook_fp") or {}
     legacy = data.get("orderbook") or {}
     if fp.get("yes_dollars") is not None or fp.get("no_dollars") is not None:
@@ -1213,41 +1213,113 @@ def orderbook(
         no_levels = legacy.get("no") or []
         in_dollars = False
 
+    # Fetch market detail for best bid/ask prices
+    market_data = api("GET", f"markets/{ticker}")
+    m = market_data.get("market", market_data)
+    
+    # If orderbook is empty but we have market detail, still show what we can
+    if not yes_levels and not no_levels:
+        yes_bid = to_cents(m.get("yes_bid_dollars"))
+        yes_ask = to_cents(m.get("yes_ask_dollars"))
+        no_bid = to_cents(m.get("no_bid_dollars"))
+        no_ask = to_cents(m.get("no_ask_dollars"))
+        
+        console.print()
+        console.print(f"[bold]{ticker}[/bold] (no active orderbook)")
+        console.print()
+        
+        if yes_bid is not None:
+            console.print(f"  [green]YES[/green]: Bid ${yes_bid/100:.2f} | Ask ${yes_ask/100:.2f}" if yes_ask else f"  [green]YES[/green]: Bid ${yes_bid/100:.2f}")
+        if no_bid is not None:
+            console.print(f"  [red]NO[/red]:   Bid ${no_bid/100:.2f} | Ask ${no_ask/100:.2f}" if no_ask else f"  [red]NO[/red]:   Bid ${no_bid/100:.2f}")
+        console.print()
+        return
+    
+    # Parse best bid/ask from market detail (convert to cents)
+    def to_cents(val):
+        if val is None:
+            return None
+        try:
+            return int(float(val) * 100)
+        except:
+            return None
+    
+    yes_bid = to_cents(m.get("yes_bid_dollars"))
+    yes_ask = to_cents(m.get("yes_ask_dollars"))
+    no_bid = to_cents(m.get("no_bid_dollars"))
+    no_ask = to_cents(m.get("no_ask_dollars"))
+    
+    # Get volume at best bid level
+    def get_vol_at_price(levels, target_cents):
+        if not levels or target_cents is None:
+            return None
+        for level in levels:
+            if in_dollars:
+                price = int(float(level[0]) * 100)
+            else:
+                price = level[0]
+            if price == target_cents:
+                return level[1]
+        return None
+    
+    yes_bid_vol = get_vol_at_price(yes_levels, yes_bid)
+    yes_ask_vol = get_vol_at_price(yes_levels, yes_ask)
+    no_bid_vol = get_vol_at_price(no_levels, no_bid)
+    no_ask_vol = get_vol_at_price(no_levels, no_ask)
+
     console.print()
-    console.print(
-        "[dim]Showing [bold]bids[/bold] (buy orders) only. "
-        "Kalshi's API does not return sell orders; implied ask from the opposite side is shown below.[/dim]\n"
-    )
-
-    yes_rows = _orderbook_levels_to_rows(yes_levels, in_dollars)
-    no_rows = _orderbook_levels_to_rows(no_levels, in_dollars)
-    best_yes = _orderbook_best_bid_cents(yes_levels, in_dollars)
-    best_no = _orderbook_best_bid_cents(no_levels, in_dollars)
-    implied_yes_ask = (100 - best_no) if best_no is not None else None
-    implied_no_ask = (100 - best_yes) if best_yes is not None else None
-
-    yes_title = f"{ticker} — YES (bids)"
-    if implied_yes_ask is not None:
-        yes_title += f"  · implied ask [dim]{implied_yes_ask}¢[/dim]"
+    
+    # Format helpers
+    def fmt_price(cents):
+        if cents is None:
+            return "—"
+        return f"${cents/100:.2f}"
+    
+    def fmt_vol(vol):
+        if vol is None:
+            return "—"
+        # Handle string volumes like '289672.00'
+        try:
+            v = float(str(vol).replace(',', ''))
+            return f"{int(v):,}" if v == int(v) else str(vol)
+        except:
+            return str(vol)
+    
+    # YES table
+    yes_title = f"{ticker} — YES"
     yes_table = Table(title=yes_title, box=box.SIMPLE, style="green")
     yes_table.add_column("Price", justify="right")
     yes_table.add_column("Quantity", justify="right")
+    
+    yes_rows = _orderbook_levels_to_rows(yes_levels, in_dollars)
     if not yes_rows:
         yes_table.add_row("—", "no bids")
     for price_str, qty_str in yes_rows:
         yes_table.add_row(price_str, qty_str)
-
-    no_title = f"{ticker} — NO (bids)"
-    if implied_no_ask is not None:
-        no_title += f"  · implied ask [dim]{implied_no_ask}¢[/dim]"
+    
+    # NO table
+    no_title = f"{ticker} — NO"
     no_table = Table(title=no_title, box=box.SIMPLE, style="red")
     no_table.add_column("Price", justify="right")
     no_table.add_column("Quantity", justify="right")
+    
+    no_rows = _orderbook_levels_to_rows(no_levels, in_dollars)
     if not no_rows:
         no_table.add_row("—", "no bids")
     for price_str, qty_str in no_rows:
         no_table.add_row(price_str, qty_str)
-
+    
+    # Print header with bid/ask info
+    console.print(f"[bold]{ticker}[/bold]")
+    console.print()
+    
+    if yes_bid is not None:
+        console.print(f"  [green]YES[/green]: [bold]Bid {fmt_price(yes_bid)}[/bold] ({fmt_vol(yes_bid_vol)}) | [bold]Ask {fmt_price(yes_ask)}[/bold] ({fmt_vol(yes_ask_vol)})")
+    
+    if no_bid is not None:
+        console.print(f"  [red]NO[/red]:   [bold]Bid {fmt_price(no_bid)}[/bold] ({fmt_vol(no_bid_vol)}) | [bold]Ask {fmt_price(no_ask)}[/bold] ({fmt_vol(no_ask_vol)})")
+    
+    console.print()
     console.print(Columns([yes_table, no_table], equal=True, expand=True))
 
 
