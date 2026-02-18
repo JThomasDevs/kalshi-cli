@@ -771,7 +771,6 @@ def markets(
     status: str = typer.Option("open", "--status", "-s", help="Filter by status (open, closed, settled)"),
     no_parlays: bool = typer.Option(False, "--no-parlays", help="Exclude parlay/multi-leg markets"),
     all_markets: bool = typer.Option(False, "--all", "-a", help="Show all markets instead of just recently traded ones"),
-    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
 ):
     """List markets on Kalshi (defaults to most recently traded)"""
     ms = []
@@ -820,25 +819,6 @@ def markets(
         return vol
     ms.sort(key=sort_key, reverse=True)
     ms = ms[:limit]
-
-    # Output as JSON if global flag is set
-    if json_output:
-        import json
-        output = []
-        for m in ms:
-            output.append({
-                "ticker": m.get("ticker", ""),
-                "title": m.get("title", ""),
-                "yes_bid": m.get("yes_bid_dollars"),
-                "no_bid": m.get("no_bid_dollars"),
-                "yes_ask": m.get("yes_ask_dollars"),
-                "no_ask": m.get("no_ask_dollars"),
-                "volume": m.get("volume_fp"),
-                "status": m.get("status"),
-                "expiration": m.get("expiration_time", "")[:10] if m.get("expiration_time") else ""
-            })
-        console.print(json.dumps(output, indent=2))
-        raise typer.Exit()
 
     console.print(market_table(ms, title=f"Kalshi Markets ({status}, top {len(ms)})"))
 
@@ -1343,19 +1323,13 @@ def orderbook(
     console.print(Columns([yes_table, no_table], equal=True, expand=True))
 
 
-
 @app.command()
-def balance(json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON")):
+def balance():
     """Show account balance"""
     try:
         data = api("GET", "portfolio/balance")
     except ApiError as e:
         handle_api_error(e)
-    if json_output:
-        import json
-        console.print(json.dumps({"balance": data.get("balance", 0) / 100}, indent=2))
-        raise typer.Exit()
-
     b = data.get("balance", 0) / 100
     console.print(f"\n[bold]Balance:[/bold] ${b:.2f}\n")
 
@@ -1447,7 +1421,6 @@ def _position_return_pct(p: dict) -> str:
 @app.command()
 def positions(
     expiring: bool = typer.Option(False, "--expiring", "-e", help="Sort by soonest expiry"),
-    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
 ):
     """Show current positions"""
     try:
@@ -1455,6 +1428,7 @@ def positions(
     except ApiError as e:
         handle_api_error(e)
     ps = data.get("market_positions", [])
+    # Filter out closed positions (0 qty)
     ps = [p for p in ps if p.get("position", 0) != 0]
     if not ps:
         console.print("[dim]No open positions[/dim]")
@@ -1466,38 +1440,6 @@ def positions(
     if expiring:
         ps.sort(key=lambda p: p.get("expiration_time", "") or "9999")
 
-    if json_output:
-        import json
-        output = []
-        for p in ps:
-            title = _normalize_title(p.get("title", "") or "")
-            qty = abs(p.get("position", 0))
-            total_cost = float(p.get("total_traded_dollars", 0) or 0)
-            cost_per_share = (total_cost / qty) if qty > 0 else 0
-            
-            if p.get("position", 0) > 0:
-                val_per_share = float(p.get("yes_bid_dollars", 0) or 0)
-            else:
-                val_per_share = float(p.get("no_bid_dollars", 0) or 0)
-            
-            current_value = _position_current_value(p)
-            
-            output.append({
-                "ticker": p.get("ticker", ""),
-                "title": title,
-                "side": "YES" if p.get("position", 0) > 0 else "NO",
-                "quantity": qty,
-                "cost_per_share": round(cost_per_share, 2),
-                "current_value_per_share": round(val_per_share, 2),
-                "total_value": round(current_value, 2),
-                "return_pct": round((val_per_share - cost_per_share) / cost_per_share * 100 if cost_per_share > 0 else 0, 1),
-                "expiration": p.get("expiration_time", "")[:10] if p.get("expiration_time") else ""
-            })
-        
-        console.print(json.dumps(output, indent=2))
-        raise typer.Exit()
-
-    # Original table output
     t = Table(title="Current Positions", box=box.ROUNDED)
     t.add_column("Title", max_width=40)
     t.add_column("Side", max_width=25)
@@ -1516,6 +1458,7 @@ def positions(
         total_cost = float(p.get("total_traded_dollars", 0) or 0)
         cost_per_share = (total_cost / qty) if qty > 0 else 0
 
+        # Current value per share
         if p.get("position", 0) > 0:
             val_per_share = float(p.get("yes_bid_dollars", 0) or 0)
         else:
@@ -1538,7 +1481,7 @@ def positions(
 
 
 @app.command()
-def orders(json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON")):
+def orders():
     """Show open (resting) orders"""
     try:
         data = api("GET", "portfolio/orders?status=resting")
@@ -1557,24 +1500,6 @@ def orders(json_output: bool = typer.Option(False, "--json", "-j", help="Output 
     t.add_column("Price", justify="right")
     t.add_column("Qty", justify="right")
     t.add_column("Remaining", justify="right")
-
-    # Output as JSON if global flag is set
-    if json_output:
-        import json
-        output = []
-        for o in order_list:
-            output.append({
-                "order_id": o.get("order_id", ""),
-                "ticker": o.get("ticker", ""),
-                "action": o.get("action", ""),
-                "side": o.get("side", ""),
-                "price": o.get("yes_price", 0) if o.get("side") == "yes" else o.get("no_price", 0),
-                "quantity": o.get("count", 0),
-                "remaining": o.get("remaining_count", 0),
-                "status": o.get("status", "")
-            })
-        console.print(json.dumps(output, indent=2))
-        raise typer.Exit()
 
     for o in order_list:
         side_str = "[green]Yes[/green]" if o.get("side") == "yes" else "[red]No[/red]"
