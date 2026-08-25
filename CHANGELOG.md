@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.76 — 2026-08-25
+
+### Fixed
+
+- **V2 order endpoint migration** — Kalshi deprecated `POST /portfolio/orders` and `DELETE /portfolio/orders/{order_id}` (returns HTTP 410 `deprecated_v1_order_endpoint`). `buy`, `sell`, and `cancel` are now routed to the V2 endpoints (`POST /portfolio/events/orders`, `DELETE /portfolio/events/orders/{order_id}`). Without this fix, all live order placement and cancellation against production was failing.
+- **V2 request body shape** — the new `buy`/`sell` body uses `side: bid|ask` (book-side, YES-leg quoted) instead of the V1 `action: buy|sell` + `side: yes|no` pair, plus fixed-point dollar strings for `price` (`"0.7800"`) and `count` (`"1.00"`), a UUID `client_order_id`, and the V2-required `time_in_force: good_till_canceled` + `self_trade_prevention_type: taker_at_cross` fields.
+- **V2 response parsing** — `buy`/`sell` now read `order_id` and `fill_count` from the top-level V2 response (`{order_id, fill_count, remaining_count, ts_ms, average_fill_price, average_fee_paid}`) instead of the V1 `{order: {order_id}}` nested shape. `cancel` now reads `reduced_by` from the V2 cancel response.
+
+### Added
+
+- **`_build_v2_order_body()` helper** — single source of truth for the V2 body shape. Translates the user-facing yes/no + cents API into V2's bid/ask + fixed-point-dollars shape with explicit comments documenting the mapping. Shared between `buy` and `sell`.
+- **`DEPRECATED_ENDPOINT` error code** — `_classify_error` now recognises HTTP 410 as `DEPRECATED_ENDPOINT` (with its own exit code, mapped alongside other categories). Future migrations to new API versions will surface a clean code instead of falling back to generic `API_ERROR`.
+- **7 new tests** in `tests/test_formatters.py` covering the V2 body shape (yes/no × buy/sell × price mapping) and the 410 classification. Total: 49 tests passing (was 42).
+
+### Notes for existing users
+
+- No breaking changes to the CLI surface (`kalshi buy TICKER COUNT PRICE --side yes` still works identically).
+- The internal request body and response parsing changed — if you have scripts that introspected the old V1 response shape, they need updating.
+- Verified end-to-end against the production API: placed a live `buy` of 1 YES contract on `KXBTCD-26AUG2513-T79099.99` at 84¢ limit, filled at 78¢ (improved by limit), fee $0.0121. Cancelled a synthetic order ID to exercise the 404 path on `cancel` (exit code 4, `NOT_FOUND`).
+
 ## 1.2.75 — 2026-08-24
 
 ### Added

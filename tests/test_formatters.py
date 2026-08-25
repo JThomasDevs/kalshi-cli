@@ -321,3 +321,80 @@ def test_api_strips_query_for_signature(monkeypatch, mocker):
     assert captured["path"] == "/trade-api/v2/markets", (
         f"signing path must be stripped of query string, got: {captured['path']}"
     )
+
+
+# ── _classify_error: 410 deprecated endpoint ───────────
+
+
+def test_classify_error_410_is_deprecated_endpoint():
+    """V1 /portfolio/orders was deprecated to 410; agents must recognise this."""
+    assert cli._classify_error(410, "deprecated_v1_order_endpoint") == "DEPRECATED_ENDPOINT"
+
+
+# ── _build_v2_order_body (V2 create-order shape) ────────
+
+
+def test_v2_body_buy_yes_at_5c():
+    body = cli._build_v2_order_body(
+        ticker="kxbTC-26aug2513-b79650", count=1, price_cents=5,
+        side="yes", action="buy", client_order_id="abc",
+    )
+    assert body["side"] == "bid"  # buy YES = bid on yes-leg
+    assert body["price"] == "0.0500"
+    assert body["count"] == "1.00"
+    assert body["ticker"] == "KXBTC-26AUG2513-B79650"  # uppercased
+    assert body["time_in_force"] == "good_till_canceled"
+    assert body["self_trade_prevention_type"] == "taker_at_cross"
+    assert body["client_order_id"] == "abc"
+    assert "action" not in body  # V2 dropped the action field
+
+
+def test_v2_body_buy_no_at_5c():
+    """buy NO at 5c = buy NO at 5c = sell YES at 95c → ask at 0.9500."""
+    body = cli._build_v2_order_body(
+        ticker="KXTEST", count=2, price_cents=5,
+        side="no", action="buy", client_order_id="x",
+    )
+    assert body["side"] == "ask"
+    assert body["price"] == "0.9500"
+    assert body["count"] == "2.00"
+
+
+def test_v2_body_sell_yes_at_50c():
+    body = cli._build_v2_order_body(
+        ticker="KXTEST", count=10, price_cents=50,
+        side="yes", action="sell", client_order_id="x",
+    )
+    assert body["side"] == "ask"
+    assert body["price"] == "0.5000"
+    assert body["count"] == "10.00"
+
+
+def test_v2_body_sell_no_at_50c():
+    """sell NO at 50c = buy YES at 50c → bid at 0.5000."""
+    body = cli._build_v2_order_body(
+        ticker="KXTEST", count=1, price_cents=50,
+        side="no", action="sell", client_order_id="x",
+    )
+    assert body["side"] == "bid"
+    assert body["price"] == "0.5000"
+
+
+def test_v2_body_count_is_fixed_point_string():
+    """V2 requires count as a string with 2 decimals ('10.00')."""
+    body = cli._build_v2_order_body(
+        ticker="KXTEST", count=7, price_cents=10,
+        side="yes", action="buy", client_order_id="x",
+    )
+    assert body["count"] == "7.00"
+    assert isinstance(body["count"], str)
+
+
+def test_v2_body_price_is_fixed_point_string_4dp():
+    """V2 requires price as a 4-decimal dollar string."""
+    body = cli._build_v2_order_body(
+        ticker="KXTEST", count=1, price_cents=1,
+        side="yes", action="buy", client_order_id="x",
+    )
+    assert body["price"] == "0.0100"
+    assert isinstance(body["price"], str)

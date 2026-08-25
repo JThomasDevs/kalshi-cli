@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+import uuid
 
 import requests
 import typer
@@ -762,6 +763,8 @@ def handle_api_error(e: ApiError):
 def _classify_error(status_code: int, message: str) -> str:
     """Map HTTP status + body to a stable agent-parseable error code."""
     msg_lower = (message or "").lower()
+    if status_code == 410:
+        return "DEPRECATED_ENDPOINT"
     if status_code == 401:
         return "AUTH_FAILED"
     if status_code == 403:
@@ -1686,6 +1689,53 @@ def orders(json_output: bool = typer.Option(False, "--json", "-j", help="Output 
     console.print(t)
 
 
+def _build_v2_order_body(
+    *,
+    ticker: str,
+    side: str,
+    count: int,
+    price_cents: int,
+    action: str,
+    client_order_id: str,
+) -> dict:
+    """Build a V2 create-order request body from a (user-friendly) yes/no + cents API.
+
+    Maps the legacy `action` + yes/no `side` into V2's book-side `bid`/`ask` quoted
+    from the YES leg, per Kalshi docs:
+        BookSide: "For event markets, this refers to the YES leg only:
+                   `bid` means buy YES, `ask` means sell YES."
+
+    Translation:
+        action=buy,  side=yes → book_side=bid,  yes_dollars = price_cents / 100
+        action=buy,  side=no  → book_side=ask, yes_dollars = (100 - price_cents) / 100
+        action=sell, side=yes → book_side=ask, yes_dollars = price_cents / 100
+        action=sell, side=no  → book_side=bid, yes_dollars = (100 - price_cents) / 100
+
+    V2 also requires `time_in_force` and `self_trade_prevention_type`. We use
+    `good_till_canceled` (rest until cancelled or filled) and `taker_at_cross`
+    (cancel this order if it would self-trade against another order from us).
+    """
+    if action == "buy":
+        book_side = "bid" if side == "yes" else "ask"
+    else:  # sell
+        book_side = "ask" if side == "yes" else "bid"
+
+    yes_dollars = price_cents / 100.0 if side == "yes" else (100 - price_cents) / 100.0
+
+    return {
+        "ticker": ticker.upper(),
+        "client_order_id": client_order_id,
+        "side": book_side,
+        "count": f"{count:.2f}",
+        "price": f"{yes_dollars:.4f}",
+        "time_in_force": "good_till_canceled",
+        "self_trade_prevention_type": "taker_at_cross",
+        "post_only": False,
+        "cancel_order_on_pause": False,
+        "reduce_only": False,
+    }
+
+
 @app.command()
 def buy(
     ticker: str = typer.Argument(help="Market ticker"),
@@ -1709,15 +1759,14 @@ def buy(
         raise typer.Exit(1)
 
     cost = count * price
-    api_body = {
-        "action": "buy",
-        "count": count,
-        "side": side,
-        "ticker": ticker.upper(),
-        "client_order_id": str(int(time.time())),
-        "type": "limit",
-        "yes_price": price if side == "yes" else 100 - price,
-    }
+    api_body = _build_v2_order_body(
+        ticker=ticker,
+        side=side,
+        count=count,
+        price_cents=price,
+        action="buy",
+        client_order_id=str(uuid.uuid4()),
+    )
 
     if dry_run:
         if as_json:
@@ -1743,13 +1792,14 @@ def buy(
         raise typer.Exit()
 
     try:
-        res = api("POST", "portfolio/orders", body=api_body)
+        res = api("POST", "portfolio/events/orders", body=api_body)
     except ApiError as e:
         handle_api_error(e)
     if as_json:
         output_json(res)
-    order_id = res.get("order", {}).get("order_id", "unknown")
-    console.print(f"[bold green]Order placed![/bold green] ID: {order_id}")
+    order_id = res.get("order_id", "unknown")
+    fill_count = res.get("fill_count", "0.00")
+    console.print(f"[bold green]Order placed![/bold green] ID: {order_id} (filled: {fill_count})")
 
 
 @app.command()
@@ -1775,15 +1825,14 @@ def sell(
         raise typer.Exit(1)
 
     proceeds = count * price
-    api_body = {
-        "action": "sell",
-        "count": count,
-        "side": side,
-        "ticker": ticker.upper(),
-        "client_order_id": str(int(time.time())),
-        "type": "limit",
-        "yes_price": price if side == "yes" else 100 - price,
-    }
+    api_body = _build_v2_order_body(
+        ticker=ticker,
+        side=side,
+        count=count,
+        price_cents=price,
+        action="sell",
+        client_order_id=str(uuid.uuid4()),
+    )
 
     if dry_run:
         if as_json:
@@ -1809,13 +1858,14 @@ def sell(
         raise typer.Exit()
 
     try:
-        res = api("POST", "portfolio/orders", body=api_body)
+        res = api("POST", "portfolio/events/orders", body=api_body)
     except ApiError as e:
         handle_api_error(e)
     if as_json:
         output_json(res)
-    order_id = res.get("order", {}).get("order_id", "unknown")
-    console.print(f"[bold green]Sell order placed![/bold green] ID: {order_id}")
+    order_id = res.get("order_id", "unknown")
+    fill_count = res.get("fill_count", "0.00")
+    console.print(f"[bold green]Sell order placed![/bold green] ID: {order_id} (filled: {fill_count})")
 
 
 @app.command()
@@ -1826,12 +1876,14 @@ def cancel(
     """Cancel an open order. Always non-interactive (cancels are easily reversible by re-placing)."""
     as_json = json_mode(flag=json_output)
     try:
-        api("DELETE", f"portfolio/orders/{order_id}")
+        res = api("DELETE", f"portfolio/events/orders/{order_id}")
     except ApiError as e:
         handle_api_error(e)
     if as_json:
-        output_json({"cancelled": True, "order_id": order_id})
-    console.print(f"[bold green]Order {order_id} cancelled[/bold green]")
+        output_json({"cancelled": True, "order_id": order_id, "response": res})
+    reduced_by = (res or {}).get("reduced_by") if isinstance(res, dict) else None
+    extra = f" (reduced_by={reduced_by})" if reduced_by else ""
+    console.print(f"[bold green]Order {order_id} cancelled[/bold green]{extra}")
 
 
 @app.command(name="setup-shell")
