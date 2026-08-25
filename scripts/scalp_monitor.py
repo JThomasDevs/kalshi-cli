@@ -87,12 +87,20 @@ def fetch_market_state(ticker: str) -> dict:
 
 
 def time_to_close(state: dict) -> float:
-    """Seconds until close_time. Negative = past close."""
-    ct = state.get("close_time")
-    if not ct:
+    """Seconds until expected_expiration_time (when market settles). Negative = past expiry.
+
+    Kalshi has two timestamps:
+      - close_time: when trading stops (markets can close early)
+      - expected_expiration_time: when the market settles (always >= close_time)
+
+    For exit decisions, expected_expiration_time is what matters — that's when
+    the contract pays out $1 or $0.
+    """
+    et = state.get("expected_expiration_time") or state.get("close_time")
+    if not et:
         return float("inf")
     try:
-        dt = datetime.fromisoformat(ct.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(et.replace("Z", "+00:00"))
     except Exception:
         return float("inf")
     return (dt - datetime.now(timezone.utc)).total_seconds()

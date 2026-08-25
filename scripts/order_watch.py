@@ -45,6 +45,7 @@ def watch_and_spawn(
     count: int,
     side: str,
     scalp_script: str,
+    no_panic: bool = False,
 ):
     """Poll until target_ticker shows in resting orders, then spawn scalp_monitor."""
     print(f"[order_watch] watching {target_ticker} for fill", flush=True)
@@ -93,6 +94,8 @@ def watch_and_spawn(
             # Redirect scalp_monitor stdout/stderr to a log file so the user can see progress
             log_path = f"/tmp/scalp_{target_ticker}.log"
             log_file = open(log_path, "w")
+            if no_panic:
+                cmd.append("--no-panic")
             subprocess.Popen(cmd, cwd=CLI_DIR, stdout=log_file, stderr=subprocess.STDOUT)
             print(f"  [log] output: {log_path}", flush=True)
             return
@@ -112,6 +115,7 @@ def main():
     p.add_argument("--close-grace-secs", type=float, default=60.0)
     p.add_argument("--count", type=int, default=1)
     p.add_argument("--side", choices=["yes", "no"], default="yes")
+    p.add_argument("--no-panic", action="store_true", help="Pass through to scalp_monitor (disable panic-cushion exit)")
     args = p.parse_args()
 
     load_env()
@@ -127,6 +131,7 @@ def main():
         count=args.count,
         side=args.side,
         scalp_script=os.path.join(SCRIPT_DIR, "scalp_monitor.py"),
+        no_panic=args.no_panic,
     )
 
 
