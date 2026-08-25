@@ -121,10 +121,11 @@ def monitor(
     count: int,
     side: str,
     dry_run: bool,
+    no_panic: bool = False,
 ):
     """Main monitor loop. Returns when position is sold or expired."""
     print(f"[scalp_monitor] starting on {ticker}", flush=True)
-    print(f"  strike={strike} target_bid={target_bid:.2f} panic_cushion=${panic_cushion}", flush=True)
+    print(f"  strike={strike} target_bid={target_bid:.2f} panic_cushion=${panic_cushion}{'  [DISABLED]' if no_panic else ''}", flush=True)
     print(f"  count={count} side={side} dry_run={dry_run}", flush=True)
 
     while True:
@@ -165,15 +166,15 @@ def monitor(
             reason = f"target_bid reached ({our_bid:.2f} >= {target_bid:.2f})"
 
         # 2. Panic: spot too close to (or past) strike in the wrong direction
-        # YES position: panic if cushion (spot - strike) drops below threshold
-        # NO  position: panic if cushion (spot - strike) rises above -threshold (spot near or above strike)
-        elif cushion is not None:
+        # Only fires when --no-panic is NOT set
+        elif not no_panic and cushion is not None:
+            distance_to_strike = abs(cushion)
             if side == "yes" and cushion < panic_cushion:
                 should_sell = True
-                reason = f"panic: cushion=${cushion:.0f} < ${panic_cushion}"
-            elif side == "no" and cushion > -panic_cushion:
+                reason = f"panic: spot ${cushion:.0f} above strike (< ${panic_cushion})"
+            elif side == "no" and distance_to_strike < panic_cushion:
                 should_sell = True
-                reason = f"panic: cushion=${cushion:.0f} > -${panic_cushion} (BTC near/above strike, NO at risk)"
+                reason = f"panic: spot ${cushion:+.0f} from strike (|${distance_to_strike:.0f}| < ${panic_cushion})"
 
         # 3. Past close: stop trying, position will auto-handle
         if secs_to_close < 0:
@@ -223,6 +224,7 @@ def main():
     p.add_argument("--count", type=int, default=1, help="Number of contracts to monitor/sell (default 1)")
     p.add_argument("--side", choices=["yes", "no"], default="yes", help="Side of the position (default yes)")
     p.add_argument("--dry-run", action="store_true", help="Print what would happen without placing orders")
+    p.add_argument("--no-panic", action="store_true", help="Disable panic-cushion exit (only target-exit or hold to settlement)")
     args = p.parse_args()
 
     # Load Kalshi credentials
@@ -239,6 +241,7 @@ def main():
         count=args.count,
         side=args.side,
         dry_run=args.dry_run,
+        no_panic=args.no_panic,
     )
 
 
