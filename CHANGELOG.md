@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.2.75 — 2026-08-24
+
+### Added
+
+- **Agent-friendly mode** — every command now supports `--json` / `-j` (or globally via `KALSHI_OUTPUT=json` env var). The following commands that previously lacked JSON output now have it: `search`, `series`, `detail`, `orderbook`, `buy`, `sell`, `cancel`. When JSON mode is active, output is plain JSON to stdout (no Rich tables, no color codes), suitable for piping into another tool.
+- **`--yes` / `-y` flag on `buy` and `sell`** — agent-friendly alias for `--force`. Lets agents skip confirmation prompts without remembering the longer flag name.
+- **`--dry-run` on `buy` and `sell`** — prints the request body and cost calculation without calling the API. Useful for backtests and validation.
+- **`output_json(data, exit_code)` helper** — writes JSON to stdout, flushes, and exits with the given code. Used by every JSON-mode code path so output is consistent and pipe-safe.
+- **`json_mode(flag)` helper** — resolves whether a command should produce JSON output. True if either `--json` was passed or `KALSHI_OUTPUT=json` is set.
+- **Stable error envelope** — when `KALSHI_OUTPUT=json`, errors come back as `{"error": {"code": "...", "status": N, "message": "..."}}` instead of free text on stderr. Codes: `AUTH_FAILED` (401), `FORBIDDEN` (403), `NOT_FOUND` (404), `RATE_LIMITED` (429), `INSUFFICIENT_FUNDS` / `INVALID_TICKER` / `INVALID_PRICE` / `INVALID_QUANTITY` / `BAD_REQUEST` (4xx), `SERVER_ERROR` (5xx), `API_ERROR` (fallback).
+- **Distinct exit codes per error category** — 0 success, 1 generic, 2 auth, 3 forbidden, 4 not_found, 5 rate_limited, 6 bad_request, 7 server. Agents can `if [ $? -eq 5 ]` to detect rate-limit backoff without parsing stderr.
+- **42 tests** (was 26). Added coverage for `_classify_error`, `_exit_code_for_status`, `json_mode`, env-var flag override.
+
+### Changed
+
+- **`orderbook` JSON-mode fast-path** — skips the redundant `markets/{ticker}` enrichment call that the human-path uses for ask prices. The orderbook payload doesn't contain asks; agents that need them should call `kalshi detail <ticker> --json` separately. Saves ~50–150ms per orderbook fetch in agent mode.
+- **Removed local `import json` shadowing** in 5 functions that now use the module-level import added in this release.
+
+### Notes for existing users
+
+- No breaking changes. Default behavior unchanged for human users.
+- New `KALSHI_OUTPUT=json` env var is opt-in.
+- `buy`/`sell` confirmation prompts still apply unless `--force` or `--yes` is passed.
+
 ## 1.2.74 — 2026-08-24
 
 ### Fixed

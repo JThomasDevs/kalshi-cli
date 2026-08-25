@@ -2,7 +2,9 @@
 """Kalshi CLI - Prediction market trading tool"""
 
 import base64
+import json
 import os
+import sys
 import time
 
 import requests
@@ -737,9 +739,90 @@ def display_series_markets(series_list: list, query: str, limit: int = 10, min_o
 
 
 def handle_api_error(e: ApiError):
-    """Print an API error and exit"""
+    """Print an API error and exit.
+
+    In JSON/agent mode (KALSHI_OUTPUT=json), emits a stable error envelope to
+    stdout with a non-zero exit code. In human mode, prints a colored error to
+    stderr and exits.
+    """
+    if os.getenv("KALSHI_OUTPUT", "").lower() == "json":
+        sys.stdout.write(json.dumps({
+            "error": {
+                "code": _classify_error(e.status_code, e.message),
+                "status": e.status_code,
+                "message": e.message,
+            }
+        }) + "\n")
+        sys.stdout.flush()
+        raise typer.Exit(_exit_code_for_status(e.status_code))
     console.print(f"[red]API Error {e.status_code}:[/red] {e.message}")
     raise typer.Exit(1)
+
+
+def _classify_error(status_code: int, message: str) -> str:
+    """Map HTTP status + body to a stable agent-parseable error code."""
+    msg_lower = (message or "").lower()
+    if status_code == 401:
+        return "AUTH_FAILED"
+    if status_code == 403:
+        return "FORBIDDEN"
+    if status_code == 404:
+        return "NOT_FOUND"
+    if status_code == 429:
+        return "RATE_LIMITED"
+    if status_code in (400, 422):
+        if "insufficient" in msg_lower or "balance" in msg_lower:
+            return "INSUFFICIENT_FUNDS"
+        if "invalid" in msg_lower and "ticker" in msg_lower:
+            return "INVALID_TICKER"
+        if "price" in msg_lower and ("invalid" in msg_lower or "out" in msg_lower):
+            return "INVALID_PRICE"
+        if "quantity" in msg_lower or "count" in msg_lower or "size" in msg_lower:
+            return "INVALID_QUANTITY"
+        return "BAD_REQUEST"
+    if status_code in (500, 502, 503, 504):
+        return "SERVER_ERROR"
+    return "API_ERROR"
+
+
+def _exit_code_for_status(status_code: int) -> int:
+    """Distinct process exit codes per error category so agents can branch on $?."""
+    if status_code == 401:
+        return 2
+    if status_code == 403:
+        return 3
+    if status_code == 404:
+        return 4
+    if status_code == 429:
+        return 5
+    if status_code in (400, 422):
+        return 6
+    if status_code in (500, 502, 503, 504):
+        return 7
+    return 1
+
+
+def output_json(data, exit_code: int = 0) -> None:
+    """Print data as JSON to stdout and exit.
+
+    Flushes stdout before raising typer.Exit so subprocess.Popen capture works
+    correctly when downstream callers pipe the output.
+    """
+    sys.stdout.write(json.dumps(data, indent=2, default=str) + "\n")
+    sys.stdout.flush()
+    raise typer.Exit(exit_code)
+
+
+def json_mode(*, flag: bool = False) -> bool:
+    """Resolve whether the current invocation should produce JSON output.
+
+    True if EITHER the --json flag was passed for this command OR the
+    KALSHI_OUTPUT=json env var is set. The env var lets agents skip adding
+    --json to every command.
+    """
+    if flag:
+        return True
+    return os.getenv("KALSHI_OUTPUT", "").lower() == "json"
 
 
 @app.command()
@@ -800,7 +883,6 @@ def markets(
 
     # Output as JSON if global flag is set
     if json_output:
-        import json
         output = [{
             "ticker": m.get("ticker", ""),
             "title": m.get("title", ""),
@@ -824,8 +906,11 @@ def search(
     limit: int = typer.Option(10, "--limit", "-l", help="Max results"),
     min_odds: float = typer.Option(0.5, "--min-odds", "-m", help="Hide markets where either side is below this % (default 0.5)"),
     expiring: bool = typer.Option(False, "--expiring", "-e", help="Sort by expiration (soonest first)"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON (or set KALSHI_OUTPUT=json)"),
 ):
     """Search markets by keyword, ticker, or category"""
+    as_json = json_mode(flag=json_output)
+    query_lower = query.lower()
     query_lower = query.lower()
 
     def apply_filters(ms: list) -> list:
@@ -843,6 +928,8 @@ def search(
                 data = api("GET", "markets/" + query.upper())
                 m = data.get("market")
                 if m:
+                    if as_json:
+                        output_json(data)
                     console.print(market_table(apply_filters([m]), title=f"Market: {query.upper()}", show_expiry=expiring))
                     return
             except ApiError:
@@ -854,6 +941,8 @@ def search(
             data = api("GET", f"markets?series_ticker={query.upper()}&status=open&limit=200")
             ms = apply_filters(data.get("markets", []))
             if ms:
+                if as_json:
+                    output_json({"strategy": "series_ticker", "query": query, "markets": ms[:limit]})
                 console.print(market_table(ms[:limit], title=f"Series: {query.upper()}", show_expiry=expiring))
                 return
         except ApiError:
@@ -889,10 +978,14 @@ def search(
                     matching_series.sort(
                         key=lambda s: active_map.get(s.get("ticker", ""), "") or "9999"
                     )
+                if as_json:
+                    output_json({"strategy": "series_keyword", "query": query, "series": matching_series[:50]})
                 display_series_list(matching_series[:50], query, expiring=expiring, limit=limit, min_odds=min_odds)
                 return
             else:
                 # Few enough to fetch markets from all of them
+                if as_json:
+                    output_json({"strategy": "series_markets", "query": query, "series": matching_series})
                 if display_series_markets(matching_series, query, limit=limit, min_odds=min_odds, expiring=expiring):
                     return
     except ApiError:
@@ -909,12 +1002,18 @@ def search(
         ]
         matching = apply_filters(matching)
         if matching:
+            if as_json:
+                output_json({"strategy": "title_match", "query": query, "markets": matching[:limit]})
             console.print(market_table(matching[:limit], title=f"Search: {query}", show_expiry=expiring))
             return
     except ApiError as e:
+        if as_json:
+            output_json({"error": {"code": _classify_error(e.status_code, e.message), "status": e.status_code, "message": e.message}}, exit_code=_exit_code_for_status(e.status_code))
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
 
+    if as_json:
+        output_json({"strategy": "none", "query": query, "markets": []}, exit_code=4)
     console.print(f"[dim]No markets found for '{query}'[/dim]")
 
 
@@ -923,8 +1022,10 @@ def series(
     query: str = typer.Argument(None, help="Optional keyword to filter series"),
     all_series_flag: bool = typer.Option(False, "--all", "-a", help="Include series with no active markets"),
     expiring: bool = typer.Option(False, "--expiring", "-e", help="Sort by soonest expiry, show expiry column"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON (or set KALSHI_OUTPUT=json)"),
 ):
     """List available series (market categories). Only shows active series by default."""
+    as_json = json_mode(flag=json_output)
     try:
         all_series = get_all_series()
     except ApiError as e:
@@ -941,6 +1042,8 @@ def series(
             matching = all_series
 
     if not matching:
+        if as_json:
+            output_json({"query": query, "series": []}, exit_code=4)
         console.print(f"[dim]No series found{' for ' + repr(query) if query else ''}[/dim]")
         raise typer.Exit()
 
@@ -977,6 +1080,12 @@ def series(
             row.append(fmt_expiry(active_map.get(s.get("ticker", ""), "")))
         row.extend([s.get("category", ""), tags])
         t.add_row(*row)
+    if as_json:
+        soonest = {s.get("ticker", ""): active_map.get(s.get("ticker", ""), "") for s in display} if expiring else {}
+        output_json({"query": query, "count": len(matching), "series": [
+            {**s, "soonest_expiration": soonest.get(s.get("ticker", ""))} if expiring else s
+            for s in display
+        ]})
     console.print(t)
 
     # Interactive drill-down
@@ -1064,12 +1173,17 @@ def _prompt_market_drill_down(ms: list, limit: int) -> bool:
 
 
 @app.command()
-def detail(ticker: str = typer.Argument(help="Market ticker (e.g. KXWO-GOLD-26-NOR)")):
+def detail(
+    ticker: str = typer.Argument(help="Market ticker (e.g. KXWO-GOLD-26-NOR)"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON (or set KALSHI_OUTPUT=json)"),
+):
     """Show detailed info for a single market"""
     try:
         data = api("GET", "markets/" + ticker.upper())
     except ApiError as e:
         handle_api_error(e)
+    if json_mode(flag=json_output):
+        output_json(data)
     _show_market_detail_panel(data.get("market", data))
 
 
@@ -1162,8 +1276,32 @@ def _resolve_series_to_single_market(series_ticker: str) -> tuple[str | None, li
 def orderbook(
     ticker: str = typer.Argument(help="Market ticker (use a specific market, not a series, when multiple exist)"),
     raw: bool = typer.Option(False, "--raw", help="Print raw API response JSON"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON (or set KALSHI_OUTPUT=json)"),
 ):
     """Show the orderbook for a market with best bid AND ask. With a series that has exactly one active market, shows that market's orderbook."""
+    as_json = json_mode(flag=json_output)
+    if as_json or raw:
+        # Fast-path: JSON mode skips the extra markets/{ticker} enrichment call
+        # that the human path uses for ask prices (not present in orderbook payload).
+        # Agents that need the ask can call `kalshi detail <ticker>` separately.
+        ticker = ticker.upper()
+        try:
+            data = api("GET", f"markets/{ticker}/orderbook")
+        except ApiError as e:
+            if e.status_code == 404:
+                single, _ = _resolve_series_to_single_market(ticker)
+                if single:
+                    ticker = single
+                    data = api("GET", f"markets/{ticker}/orderbook")
+                else:
+                    handle_api_error(e)
+            else:
+                handle_api_error(e)
+        if raw and not as_json:
+            sys.stdout.write(json.dumps(data, indent=2) + "\n")
+            sys.stdout.flush()
+            return
+        output_json({"ticker": ticker, "orderbook": data})
     ticker = ticker.upper()
     try:
         data = api("GET", f"markets/{ticker}/orderbook")
@@ -1181,7 +1319,6 @@ def orderbook(
             handle_api_error(e)
 
     if raw:
-        import json
         console.print(json.dumps(data, indent=2))
         return
 
@@ -1316,7 +1453,6 @@ def balance(json_output: bool = typer.Option(False, "--json", "-j", help="Output
     except ApiError as e:
         handle_api_error(e)
     if json_output:
-        import json
         console.print(json.dumps({"balance": data.get("balance", 0) / 100}, indent=2))
         raise typer.Exit()
 
@@ -1431,7 +1567,6 @@ def positions(
         ps.sort(key=lambda p: p.get("expiration_time", "") or "9999")
 
     if json_output:
-        import json
         output = []
         for p in ps:
             title = _normalize_title(p.get("title", "") or "")
@@ -1524,7 +1659,6 @@ def orders(json_output: bool = typer.Option(False, "--json", "-j", help="Output 
 
     # Output as JSON if global flag is set
     if json_output:
-        import json
         output = [{
             "order_id": o.get("order_id", ""),
             "ticker": o.get("ticker", ""),
@@ -1559,24 +1693,22 @@ def buy(
     price: int = typer.Argument(help="Price in cents (e.g. 68 for $0.68)"),
     side: str = typer.Option("yes", "--side", "-s", help="Contract side: 'yes' or 'no'"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt"),
+    yes_flag: bool = typer.Option(False, "--yes", "-y", help="Alias for --force (agent-friendly)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be placed without calling the API"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON (or set KALSHI_OUTPUT=json)"),
 ):
     """Place a limit buy order"""
+    as_json = json_mode(flag=json_output)
+    if yes_flag:
+        force = True
     side = side.lower()
     if side not in ("yes", "no"):
+        if as_json:
+            output_json({"error": {"code": "BAD_REQUEST", "message": "side must be 'yes' or 'no'"}}, exit_code=6)
         console.print("[red]Error:[/red] --side must be 'yes' or 'no'")
         raise typer.Exit(1)
 
     cost = count * price
-    console.print(
-        f"\n  Buy [bold]{count}x {side.upper()}[/bold] on "
-        f"[cyan]{ticker.upper()}[/cyan] @ {price}¢ each"
-    )
-    console.print(f"  Max cost: [yellow]${cost / 100:.2f}[/yellow]\n")
-
-    if not force and not typer.confirm("Confirm order?"):
-        console.print("[dim]Cancelled[/dim]")
-        raise typer.Exit()
-
     api_body = {
         "action": "buy",
         "count": count,
@@ -1586,10 +1718,36 @@ def buy(
         "type": "limit",
         "yes_price": price if side == "yes" else 100 - price,
     }
+
+    if dry_run:
+        if as_json:
+            output_json({"dry_run": True, "request_body": api_body, "max_cost_cents": cost})
+        console.print(
+            f"\n  [dim][dry-run][/dim] Buy [bold]{count}x {side.upper()}[/bold] on "
+            f"[cyan]{ticker.upper()}[/cyan] @ {price}¢ each"
+        )
+        console.print(f"  Max cost: [yellow]${cost / 100:.2f}[/yellow]")
+        console.print(f"  Request body: [dim]{json.dumps(api_body)}[/dim]")
+        return
+
+    if not as_json:
+        console.print(
+            f"\n  Buy [bold]{count}x {side.upper()}[/bold] on "
+            f"[cyan]{ticker.upper()}[/cyan] @ {price}¢ each"
+        )
+        console.print(f"  Max cost: [yellow]${cost / 100:.2f}[/yellow]\n")
+    if not force and not typer.confirm("Confirm order?"):
+        if as_json:
+            output_json({"cancelled": True, "reason": "user_declined"})
+        console.print("[dim]Cancelled[/dim]")
+        raise typer.Exit()
+
     try:
         res = api("POST", "portfolio/orders", body=api_body)
     except ApiError as e:
         handle_api_error(e)
+    if as_json:
+        output_json(res)
     order_id = res.get("order", {}).get("order_id", "unknown")
     console.print(f"[bold green]Order placed![/bold green] ID: {order_id}")
 
@@ -1601,24 +1759,22 @@ def sell(
     price: int = typer.Argument(help="Price in cents"),
     side: str = typer.Option("yes", "--side", "-s", help="Contract side: 'yes' or 'no'"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt"),
+    yes_flag: bool = typer.Option(False, "--yes", "-y", help="Alias for --force (agent-friendly)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be placed without calling the API"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON (or set KALSHI_OUTPUT=json)"),
 ):
     """Place a limit sell order"""
+    as_json = json_mode(flag=json_output)
+    if yes_flag:
+        force = True
     side = side.lower()
     if side not in ("yes", "no"):
+        if as_json:
+            output_json({"error": {"code": "BAD_REQUEST", "message": "side must be 'yes' or 'no'"}}, exit_code=6)
         console.print("[red]Error:[/red] --side must be 'yes' or 'no'")
         raise typer.Exit(1)
 
     proceeds = count * price
-    console.print(
-        f"\n  Sell [bold]{count}x {side.upper()}[/bold] on "
-        f"[cyan]{ticker.upper()}[/cyan] @ {price}¢ each"
-    )
-    console.print(f"  Expected proceeds: [yellow]${proceeds / 100:.2f}[/yellow]\n")
-
-    if not force and not typer.confirm("Confirm order?"):
-        console.print("[dim]Cancelled[/dim]")
-        raise typer.Exit()
-
     api_body = {
         "action": "sell",
         "count": count,
@@ -1628,10 +1784,36 @@ def sell(
         "type": "limit",
         "yes_price": price if side == "yes" else 100 - price,
     }
+
+    if dry_run:
+        if as_json:
+            output_json({"dry_run": True, "request_body": api_body, "expected_proceeds_cents": proceeds})
+        console.print(
+            f"\n  [dim][dry-run][/dim] Sell [bold]{count}x {side.upper()}[/bold] on "
+            f"[cyan]{ticker.upper()}[/cyan] @ {price}¢ each"
+        )
+        console.print(f"  Expected proceeds: [yellow]${proceeds / 100:.2f}[/yellow]")
+        console.print(f"  Request body: [dim]{json.dumps(api_body)}[/dim]")
+        return
+
+    if not as_json:
+        console.print(
+            f"\n  Sell [bold]{count}x {side.upper()}[/bold] on "
+            f"[cyan]{ticker.upper()}[/cyan] @ {price}¢ each"
+        )
+        console.print(f"  Expected proceeds: [yellow]${proceeds / 100:.2f}[/yellow]\n")
+    if not force and not typer.confirm("Confirm order?"):
+        if as_json:
+            output_json({"cancelled": True, "reason": "user_declined"})
+        console.print("[dim]Cancelled[/dim]")
+        raise typer.Exit()
+
     try:
         res = api("POST", "portfolio/orders", body=api_body)
     except ApiError as e:
         handle_api_error(e)
+    if as_json:
+        output_json(res)
     order_id = res.get("order", {}).get("order_id", "unknown")
     console.print(f"[bold green]Sell order placed![/bold green] ID: {order_id}")
 
@@ -1639,12 +1821,16 @@ def sell(
 @app.command()
 def cancel(
     order_id: str = typer.Argument(help="Order ID to cancel"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON (or set KALSHI_OUTPUT=json)"),
 ):
-    """Cancel an open order"""
+    """Cancel an open order. Always non-interactive (cancels are easily reversible by re-placing)."""
+    as_json = json_mode(flag=json_output)
     try:
         api("DELETE", f"portfolio/orders/{order_id}")
     except ApiError as e:
         handle_api_error(e)
+    if as_json:
+        output_json({"cancelled": True, "order_id": order_id})
     console.print(f"[bold green]Order {order_id} cancelled[/bold green]")
 
 

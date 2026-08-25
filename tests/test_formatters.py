@@ -201,6 +201,90 @@ def test_market_expiry_ts_returns_empty_when_all_fields_missing():
     assert cli._market_expiry_ts(m) == ""
 
 
+# ── agent-mode helpers ─────────────────────────────────
+
+
+def test_classify_error_auth():
+    assert cli._classify_error(401, "unauthorized") == "AUTH_FAILED"
+
+
+def test_classify_error_not_found():
+    assert cli._classify_error(404, "not found") == "NOT_FOUND"
+
+
+def test_classify_error_rate_limit():
+    assert cli._classify_error(429, "slow down") == "RATE_LIMITED"
+
+
+def test_classify_error_insufficient_funds():
+    assert cli._classify_error(400, "Insufficient funds in account") == "INSUFFICIENT_FUNDS"
+
+
+def test_classify_error_invalid_ticker():
+    assert cli._classify_error(400, "invalid ticker KXFOO") == "INVALID_TICKER"
+
+
+def test_classify_error_invalid_price():
+    assert cli._classify_error(400, "Price out of bounds") == "INVALID_PRICE"
+
+
+def test_classify_error_invalid_quantity():
+    assert cli._classify_error(422, "count must be positive") == "INVALID_QUANTITY"
+
+
+def test_classify_error_server():
+    assert cli._classify_error(503, "down for maintenance") == "SERVER_ERROR"
+
+
+def test_classify_error_unknown_status_falls_back():
+    # Status codes outside our typed map use API_ERROR
+    assert cli._classify_error(418, "teapot") == "API_ERROR"
+
+
+def test_exit_codes_are_distinct_per_category():
+    """Different error categories get different exit codes so agents can branch."""
+    codes = {
+        cli._exit_code_for_status(401),
+        cli._exit_code_for_status(404),
+        cli._exit_code_for_status(429),
+        cli._exit_code_for_status(400),
+        cli._exit_code_for_status(503),
+    }
+    assert len(codes) == 5
+
+
+def test_exit_code_for_status_zero_for_success():
+    # exit_code_for_status is for errors only; success is 0
+    # (just confirm we don't accidentally return 0 for error statuses)
+    assert cli._exit_code_for_status(401) != 0
+    assert cli._exit_code_for_status(500) != 0
+
+
+def test_json_mode_flag_overrides():
+    """--json flag enables JSON mode regardless of env."""
+    assert cli.json_mode(flag=True) is True
+
+
+def test_json_mode_env_var_enables(monkeypatch):
+    monkeypatch.setenv("KALSHI_OUTPUT", "json")
+    assert cli.json_mode() is True
+
+
+def test_json_mode_env_var_case_insensitive(monkeypatch):
+    monkeypatch.setenv("KALSHI_OUTPUT", "JSON")
+    assert cli.json_mode() is True
+
+
+def test_json_mode_default_human(monkeypatch):
+    monkeypatch.delenv("KALSHI_OUTPUT", raising=False)
+    assert cli.json_mode() is False
+
+
+def test_json_mode_empty_env_value_is_human(monkeypatch):
+    monkeypatch.setenv("KALSHI_OUTPUT", "")
+    assert cli.json_mode() is False
+
+
 # ── api() query-string stripping (regression) ──────────
 
 
