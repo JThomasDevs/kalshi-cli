@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """Kalshi CLI - Prediction market trading tool"""
 
-import os
-import sys
-import time
 import base64
+import os
+import time
 
 import requests
 import typer
-from rich.table import Table
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from rich import box
+from rich.columns import Columns
 from rich.console import Console
 from rich.panel import Panel
-from rich.columns import Columns
-from rich import box
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import padding
+from rich.table import Table
 
 app = typer.Typer(help="Kalshi prediction market CLI")
-BASE_URL = "https://api.elections.kalshi.com"
+BASE_URL = os.getenv("KALSHI_BASE_URL", "https://external-api.kalshi.com")
+DEMO_BASE_URL = "https://external-api.demo.kalshi.co"
 console = Console()
 
 
@@ -37,10 +37,9 @@ def load_env():
     env_path = os.path.expanduser("~/.kalshi/.env")
     if not os.path.exists(env_path):
         return
-    with open(env_path, "r") as f:
+    with open(env_path) as f:
         for line in f:
-            if line.startswith("export "):
-                line = line[7:]
+            line = line.removeprefix("export ")
             if "=" in line:
                 key, val = line.strip().split("=", 1)
                 os.environ[key] = val.strip('"').strip("'")
@@ -77,7 +76,7 @@ def sign_request(ts: str, method: str, path: str, key) -> str:
     return base64.b64encode(sig).decode()
 
 
-def api(method: str, endpoint: str, body: dict = None) -> dict:
+def api(method: str, endpoint: str, body: dict | None = None) -> dict:
     """Make an authenticated Kalshi API request"""
     load_env()
     key_id = os.getenv("KALSHI_ACCESS_KEY")
@@ -147,6 +146,16 @@ def fmt_dollars(val) -> str:
         return str(val)
 
 
+def to_cents(val) -> int | None:
+    """Convert a dollar amount (int/float/str) to integer cents. Returns None on bad input."""
+    if val is None:
+        return None
+    try:
+        return int(float(val) * 100)
+    except (ValueError, TypeError):
+        return None
+
+
 def filter_by_min_odds(markets: list, min_odds: float) -> list:
     """Filter out markets where either yes or no bid is below min_odds (as %)"""
     if min_odds <= 0:
@@ -162,58 +171,35 @@ def filter_by_min_odds(markets: list, min_odds: float) -> list:
 
 
 def _parse_expiry_from_ticker(ticker: str):
-    """If ticker has segment like 26FEB161745 (DDMMMHHMMSS), return ISO ts in UTC.
-    For 15M/5M series the segment is window start; add 15 or 5 minutes for close time.
+    """Parse a 15M/5M-series ticker's expiry segment into an ISO timestamp in UTC.
+
+    Kalshi's 15M/5M tickers use a custom 11-char segment (e.g. ``26AUG242345``) whose
+    format is documented internally but not publicly stable enough to parse here
+    without risk. The API reliably returns ``close_time`` and ``expected_expiration_time``
+    for every market, so this function is dead code in practice and was removed
+    in 1.2.74. Kept as a stub returning None to preserve import-time signature
+    compatibility in case any external tooling references it.
+
+    Returns: None.
     """
-    import re
-    from datetime import datetime, timezone, timedelta
-    if not ticker or "-" not in ticker:
-        return None
-    parts = ticker.split("-")
-    for part in parts:
-        if len(part) == 11 and re.match(r"\d{2}[A-Z]{3}\d{6}$", part):
-            try:
-                day = int(part[:2])
-                mon = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
-                       "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}.get(part[2:5])
-                if not mon:
-                    continue
-                h, mi, s = int(part[5:7]), int(part[7:9]), int(part[9:11])
-                now = datetime.now(timezone.utc)
-                year = now.year
-                dt = datetime(year, mon, day, h, mi, s, tzinfo=timezone.utc)
-                if dt <= now:
-                    year += 1
-                    dt = datetime(year, mon, day, h, mi, s, tzinfo=timezone.utc)
-                # 15m/5m markets: ticker time is window start, close = start + window
-                ticker_upper = ticker.upper()
-                if "15M" in ticker_upper:
-                    dt = dt + timedelta(minutes=15)
-                elif "5M" in ticker_upper:
-                    dt = dt + timedelta(minutes=5)
-                return dt.isoformat()
-            except (ValueError, KeyError):
-                pass
     return None
 
 
 def _market_expiry_ts(m: dict) -> str:
-    """Best expiry timestamp: API fields first, then parsed from ticker for 15m-style markets."""
-    ts = (
+    """Best expiry timestamp from API fields.
+
+    15M/5M-series ticker-segment parsing was removed in 1.2.74 — it relied on an
+    undocumented ticker format that didn't match real-world samples. The API
+    reliably returns ``expected_expiration_time`` / ``close_time`` for every
+    market, so we just use those.
+    """
+    return (
         m.get("expected_expiration_time")
         or m.get("close_time")
         or m.get("expiration_time")
         or m.get("latest_expiration_time")
         or ""
     )
-    if ts:
-        return ts
-    ticker = m.get("ticker", "")
-    if ticker and ("15M" in ticker.upper() or "5M" in ticker.upper()):
-        parsed = _parse_expiry_from_ticker(ticker)
-        if parsed:
-            return parsed
-    return ""
 
 
 def sort_by_expiry(markets: list) -> list:
@@ -292,9 +278,7 @@ def _is_binary_yes_no_market(title: str) -> bool:
     if t.startswith("will ") and (" be " in t or " win " in t or " have " in t or " the " in t):
         return True
     # Spread markets: "Team wins by over X points" = binary
-    if "wins by over" in t and "points" in t:
-        return True
-    return False
+    return bool("wins by over" in t and "points" in t)
 
 
 def _position_side_label(yes_sub: str, no_sub: str, position: int, title: str = "") -> str:
@@ -505,10 +489,7 @@ def market_table(markets: list, title: str = "Markets", show_expiry: bool = Fals
         no = fmt_price(m.get("no_bid_dollars"))
         vol = fmt_dollars(m.get("volume_fp", 0))
 
-        if numbered:
-            row = [str(i)]
-        else:
-            row = []
+        row = [str(i)] if numbered else []
         if has_subtitles:
             outcome = _outcome_column(m)
             if up_down:
@@ -635,10 +616,7 @@ def find_matching_series(query: str, active_only: bool = True) -> list:
 
     all_series = get_all_series()
 
-    if active_only:
-        active_map = get_active_series_tickers()
-    else:
-        active_map = None
+    active_map = get_active_series_tickers() if active_only else None
 
     matches = []
     seen = set()
@@ -716,7 +694,7 @@ def display_series_list(
             else:
                 console.print(f"[red]Pick 1-{len(series_list)}[/red]")
         except ValueError:
-            console.print(f"[red]Enter a number or 'q'[/red]")
+            console.print("[red]Enter a number or 'q'[/red]")
 
 
 def display_series_markets(series_list: list, query: str, limit: int = 10, min_odds: float = 0.5, expiring: bool = False):
@@ -731,8 +709,7 @@ def display_series_markets(series_list: list, query: str, limit: int = 10, min_o
         series_names.append(s.get("title", ticker))
         try:
             data = api("GET", f"markets?series_ticker={ticker}&status=open&limit=100")
-            for m in data.get("markets", []):
-                all_markets.append(m)
+            all_markets.extend(data.get("markets", []))
         except ApiError:
             pass
 
@@ -824,19 +801,17 @@ def markets(
     # Output as JSON if global flag is set
     if json_output:
         import json
-        output = []
-        for m in ms:
-            output.append({
-                "ticker": m.get("ticker", ""),
-                "title": m.get("title", ""),
-                "yes_bid": m.get("yes_bid_dollars"),
-                "no_bid": m.get("no_bid_dollars"),
-                "yes_ask": m.get("yes_ask_dollars"),
-                "no_ask": m.get("no_ask_dollars"),
-                "volume": m.get("volume_fp"),
-                "status": m.get("status"),
-                "expiration": m.get("expiration_time", "")[:10] if m.get("expiration_time") else ""
-            })
+        output = [{
+            "ticker": m.get("ticker", ""),
+            "title": m.get("title", ""),
+            "yes_bid": m.get("yes_bid_dollars"),
+            "no_bid": m.get("no_bid_dollars"),
+            "yes_ask": m.get("yes_ask_dollars"),
+            "no_ask": m.get("no_ask_dollars"),
+            "volume": m.get("volume_fp"),
+            "status": m.get("status"),
+            "expiration": m.get("expiration_time", "")[:10] if m.get("expiration_time") else ""
+        } for m in ms]
         console.print(json.dumps(output, indent=2))
         raise typer.Exit()
 
@@ -1032,7 +1007,7 @@ def series(
             else:
                 console.print(f"[red]Pick 1-{len(display)}[/red]")
         except ValueError:
-            console.print(f"[red]Enter a number or 'q'[/red]")
+            console.print("[red]Enter a number or 'q'[/red]")
 
 
 def _show_market_detail_panel(m: dict):
@@ -1108,7 +1083,7 @@ def _orderbook_best_bid_cents(levels: list, in_dollars: bool) -> int | None:
     price_val = level[0]
     try:
         if in_dollars:
-            return int(round(float(price_val) * 100))
+            return round(float(price_val) * 100)
         return int(price_val)
     except (TypeError, ValueError):
         return None
@@ -1124,7 +1099,7 @@ def _orderbook_levels_to_rows(levels: list, in_dollars: bool) -> list[tuple[str,
             price_val, size_val = level[0], level[1]
             if in_dollars:
                 try:
-                    price_cents = int(round(float(price_val) * 100))
+                    price_cents = round(float(price_val) * 100)
                 except (TypeError, ValueError):
                     price_cents = 0
                 size_str = str(size_val).rstrip("0").rstrip(".") if size_val else "0"
@@ -1236,65 +1211,54 @@ def orderbook(
     # Fetch market detail for best bid/ask prices
     market_data = api("GET", f"markets/{ticker}")
     m = market_data.get("market", market_data)
-    
+
     # If orderbook is empty but we have market detail, still show what we can
     if not yes_levels and not no_levels:
         yes_bid = to_cents(m.get("yes_bid_dollars"))
         yes_ask = to_cents(m.get("yes_ask_dollars"))
         no_bid = to_cents(m.get("no_bid_dollars"))
         no_ask = to_cents(m.get("no_ask_dollars"))
-        
+
         console.print()
         console.print(f"[bold]{ticker}[/bold] (no active orderbook)")
         console.print()
-        
+
         if yes_bid is not None:
             console.print(f"  [green]YES[/green]: Bid ${yes_bid/100:.2f} | Ask ${yes_ask/100:.2f}" if yes_ask else f"  [green]YES[/green]: Bid ${yes_bid/100:.2f}")
         if no_bid is not None:
             console.print(f"  [red]NO[/red]:   Bid ${no_bid/100:.2f} | Ask ${no_ask/100:.2f}" if no_ask else f"  [red]NO[/red]:   Bid ${no_bid/100:.2f}")
         console.print()
         return
-    
+
     # Parse best bid/ask from market detail (convert to cents)
-    def to_cents(val):
-        if val is None:
-            return None
-        try:
-            return int(float(val) * 100)
-        except:
-            return None
-    
     yes_bid = to_cents(m.get("yes_bid_dollars"))
     yes_ask = to_cents(m.get("yes_ask_dollars"))
     no_bid = to_cents(m.get("no_bid_dollars"))
     no_ask = to_cents(m.get("no_ask_dollars"))
-    
+
     # Get volume at best bid level
     def get_vol_at_price(levels, target_cents):
         if not levels or target_cents is None:
             return None
         for level in levels:
-            if in_dollars:
-                price = int(float(level[0]) * 100)
-            else:
-                price = level[0]
+            price = int(float(level[0]) * 100) if in_dollars else level[0]
             if price == target_cents:
                 return level[1]
         return None
-    
+
     yes_bid_vol = get_vol_at_price(yes_levels, yes_bid)
     yes_ask_vol = get_vol_at_price(yes_levels, yes_ask)
     no_bid_vol = get_vol_at_price(no_levels, no_bid)
     no_ask_vol = get_vol_at_price(no_levels, no_ask)
 
     console.print()
-    
+
     # Format helpers
     def fmt_price(cents):
         if cents is None:
             return "—"
         return f"${cents/100:.2f}"
-    
+
     def fmt_vol(vol):
         if vol is None:
             return "—"
@@ -1302,43 +1266,43 @@ def orderbook(
         try:
             v = float(str(vol).replace(',', ''))
             return f"{int(v):,}" if v == int(v) else str(vol)
-        except:
+        except (TypeError, ValueError):
             return str(vol)
-    
+
     # YES table
     yes_title = f"{ticker} — YES"
     yes_table = Table(title=yes_title, box=box.SIMPLE, style="green")
     yes_table.add_column("Price", justify="right")
     yes_table.add_column("Quantity", justify="right")
-    
+
     yes_rows = _orderbook_levels_to_rows(yes_levels, in_dollars)
     if not yes_rows:
         yes_table.add_row("—", "no bids")
     for price_str, qty_str in yes_rows:
         yes_table.add_row(price_str, qty_str)
-    
+
     # NO table
     no_title = f"{ticker} — NO"
     no_table = Table(title=no_title, box=box.SIMPLE, style="red")
     no_table.add_column("Price", justify="right")
     no_table.add_column("Quantity", justify="right")
-    
+
     no_rows = _orderbook_levels_to_rows(no_levels, in_dollars)
     if not no_rows:
         no_table.add_row("—", "no bids")
     for price_str, qty_str in no_rows:
         no_table.add_row(price_str, qty_str)
-    
+
     # Print header with bid/ask info
     console.print(f"[bold]{ticker}[/bold]")
     console.print()
-    
+
     if yes_bid is not None:
         console.print(f"  [green]YES[/green]: [bold]Bid {fmt_price(yes_bid)}[/bold] ({fmt_vol(yes_bid_vol)}) | [bold]Ask {fmt_price(yes_ask)}[/bold] ({fmt_vol(yes_ask_vol)})")
-    
+
     if no_bid is not None:
         console.print(f"  [red]NO[/red]:   [bold]Bid {fmt_price(no_bid)}[/bold] ({fmt_vol(no_bid_vol)}) | [bold]Ask {fmt_price(no_ask)}[/bold] ({fmt_vol(no_ask_vol)})")
-    
+
     console.print()
     console.print(Columns([yes_table, no_table], equal=True, expand=True))
 
@@ -1474,14 +1438,14 @@ def positions(
             qty = abs(p.get("position", 0))
             total_cost = float(p.get("total_traded_dollars", 0) or 0)
             cost_per_share = (total_cost / qty) if qty > 0 else 0
-            
+
             if p.get("position", 0) > 0:
                 val_per_share = float(p.get("yes_bid_dollars", 0) or 0)
             else:
                 val_per_share = float(p.get("no_bid_dollars", 0) or 0)
-            
+
             current_value = _position_current_value(p)
-            
+
             output.append({
                 "ticker": p.get("ticker", ""),
                 "title": title,
@@ -1493,7 +1457,7 @@ def positions(
                 "return_pct": round((val_per_share - cost_per_share) / cost_per_share * 100 if cost_per_share > 0 else 0, 1),
                 "expiration": p.get("expiration_time", "")[:10] if p.get("expiration_time") else ""
             })
-        
+
         console.print(json.dumps(output, indent=2))
         raise typer.Exit()
 
@@ -1561,18 +1525,16 @@ def orders(json_output: bool = typer.Option(False, "--json", "-j", help="Output 
     # Output as JSON if global flag is set
     if json_output:
         import json
-        output = []
-        for o in order_list:
-            output.append({
-                "order_id": o.get("order_id", ""),
-                "ticker": o.get("ticker", ""),
-                "action": o.get("action", ""),
-                "side": o.get("side", ""),
-                "price": o.get("yes_price", 0) if o.get("side") == "yes" else o.get("no_price", 0),
-                "quantity": o.get("count", 0),
-                "remaining": o.get("remaining_count", 0),
-                "status": o.get("status", "")
-            })
+        output = [{
+            "order_id": o.get("order_id", ""),
+            "ticker": o.get("ticker", ""),
+            "action": o.get("action", ""),
+            "side": o.get("side", ""),
+            "price": o.get("yes_price", 0) if o.get("side") == "yes" else o.get("no_price", 0),
+            "quantity": o.get("count", 0),
+            "remaining": o.get("remaining_count", 0),
+            "status": o.get("status", "")
+        } for o in order_list]
         console.print(json.dumps(output, indent=2))
         raise typer.Exit()
 
@@ -1611,10 +1573,9 @@ def buy(
     )
     console.print(f"  Max cost: [yellow]${cost / 100:.2f}[/yellow]\n")
 
-    if not force:
-        if not typer.confirm("Confirm order?"):
-            console.print("[dim]Cancelled[/dim]")
-            raise typer.Exit()
+    if not force and not typer.confirm("Confirm order?"):
+        console.print("[dim]Cancelled[/dim]")
+        raise typer.Exit()
 
     api_body = {
         "action": "buy",
@@ -1654,10 +1615,9 @@ def sell(
     )
     console.print(f"  Expected proceeds: [yellow]${proceeds / 100:.2f}[/yellow]\n")
 
-    if not force:
-        if not typer.confirm("Confirm order?"):
-            console.print("[dim]Cancelled[/dim]")
-            raise typer.Exit()
+    if not force and not typer.confirm("Confirm order?"):
+        console.print("[dim]Cancelled[/dim]")
+        raise typer.Exit()
 
     api_body = {
         "action": "sell",
@@ -1693,27 +1653,30 @@ def setup_shell():
     """Add KALSHI_ACCESS_KEY to your shell config and create RSA private key template"""
     load_env()
     key_id = os.getenv("KALSHI_ACCESS_KEY")
-    
+
     # Create ~/.kalshi directory and files if they don't exist
     kalshi_dir = os.path.expanduser("~/.kalshi")
     os.makedirs(kalshi_dir, exist_ok=True)
-    
+
     env_path = os.path.join(kalshi_dir, '.env')
     if not os.path.exists(env_path):
         with open(env_path, "w") as f:
             f.write(f'KALSHI_ACCESS_KEY={key_id or "your_access_key_here"}\n')
         console.print(f"[green]Created[/green] {env_path}")
-    elif key_id and key_id not in open(env_path).read():
-        with open(env_path, "a") as f:
-            f.write(f'KALSHI_ACCESS_KEY={key_id}\n')
+    elif key_id:
+        with open(env_path) as f:
+            existing = f.read()
+        if key_id not in existing:
+            with open(env_path, "a") as f:
+                f.write(f'KALSHI_ACCESS_KEY={key_id}\n')
         console.print(f"[green]Updated[/green] {env_path}")
-    
+
     key_path = os.path.join(kalshi_dir, 'private_key.pem')
     if not os.path.exists(key_path):
         with open(key_path, "w") as f:
             f.write("# Place your RSA private key here\n# Get it from: https://kalshi.com/api\n-----BEGIN RSA PRIVATE KEY-----\nyour_private_key_here\n-----END RSA PRIVATE KEY-----\n")
         console.print(f"[yellow]Created[/yellow] {key_path} — paste your RSA private key here")
-    
+
     if not key_id:
         console.print("[red]Error:[/red] No KALSHI_ACCESS_KEY found. Add it to ~/.kalshi/.env")
         raise typer.Exit(1)
@@ -1725,7 +1688,7 @@ def setup_shell():
     updated = False
     for rc in [bashrc, zshrc]:
         if os.path.exists(rc):
-            with open(rc, "r") as f:
+            with open(rc) as f:
                 content = f.read()
             if key_id not in content:
                 with open(rc, "a") as f:

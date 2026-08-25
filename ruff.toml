@@ -1,0 +1,22 @@
+# ruff config — kalshi-cli
+target-version = "py310"
+line-length = 100
+
+[lint]
+# S110: try/except/pass — fine for "best-effort" cleanup; tolerate in cli scripts
+# BLE001: blind Exception catch — fine for top-level command boundaries
+# EXE001 handled in select below
+select = ["E", "F", "W", "I", "UP", "SIM", "PERF"]
+ignore = [
+    "E501",   # line length handled by formatter
+    "S110",   # try/except/pass — intentional best-effort cleanup in cli code
+    "BLE001", # blind Exception — fine at command boundaries in a CLI
+    "B008",   # function call in default argument — common with Typer patterns
+]
+
+[lint.per-file-ignores]
+"cli.py" = ["EXE001"]  # shebang expected; file is invoked via npm postinstall wrapper
+
+[format]
+quote-style = "double"
+indent-style = "space"

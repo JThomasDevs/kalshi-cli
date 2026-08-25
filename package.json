@@ -1,12 +1,14 @@
 {
   "name": "kalshi-cli",
-  "version": "1.2.73",
+  "version": "1.2.74",
   "description": "Interactive CLI for trading prediction markets on Kalshi",
   "bin": {
     "kalshi": "bin/kalshi"
   },
   "scripts": {
-    "postinstall": "node postinstall.js"
+    "postinstall": "node postinstall.js",
+    "test": "pytest tests/ -v",
+    "lint": "ruff check cli.py tests/"
   },
   "keywords": [
     "kalshi",
