@@ -35,19 +35,33 @@ from cli import api, load_env, load_key, _build_v2_order_body, ApiError  # noqa:
 
 
 def fetch_btc_spot() -> float | None:
-    """Fetch BTC spot from CoinGecko. Returns None on failure."""
+    """Fetch BTC spot from multiple sources with fallback. Returns None on total failure."""
     import urllib.request
     import json
-    try:
-        with urllib.request.urlopen(
-            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-            timeout=5,
-        ) as resp:
-            data = json.loads(resp.read())
-        return float(data["bitcoin"]["usd"])
-    except Exception as e:
-        print(f"  [warn] BTC spot fetch failed: {e}", flush=True)
-        return None
+
+    sources = [
+        # CoinGecko (free, rate-limited)
+        ("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+         lambda data: float(data["bitcoin"]["usd"])),
+        # Coinbase (no rate limit for spot)
+        ("https://api.coinbase.com/v2/prices/BTC-USD/spot",
+         lambda data: float(data["data"]["amount"])),
+        # Kraken (no rate limit for public ticker)
+        ("https://api.kraken.com/0/public/Ticker?pair=XBTUSD",
+         lambda data: float(list(data["result"].values())[0]["c"][0])),
+    ]
+
+    for url, parser in sources:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "kalshi-scalp-monitor/1.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+            price = parser(data)
+            return float(price)
+        except Exception as e:
+            print(f"  [warn] {url.split('/')[2]} spot fetch failed: {e}", flush=True)
+            continue
+    return None
 
 
 def fetch_market_state(ticker: str) -> dict:
@@ -162,10 +176,17 @@ def monitor(
                 print(f"  [dry-run] would sell {count}x {side} @ market (bid {state['yes_bid']:.2f})", flush=True)
                 return
             try:
-                # Sell at the current bid (in cents)
-                sell_price_cents = int(round(state["yes_bid"] * 100))
-                if sell_price_cents < 1:
-                    sell_price_cents = 1
+                # Re-fetch the latest bid just before placing the sell, to avoid
+                # the race where the orderbook moves between detection and
+                # execution. Place at bid-1¢ to ensure we CROSS the book and
+                # become a taker — a limit at the bid price can sit unfilled if
+                # the bid drops before our order lands.
+                latest = fetch_market_state(ticker)
+                latest_bid = latest["yes_bid"]
+                # For YES: sell at (latest_bid - 1)¢ to guarantee fill
+                # For NO: symmetric logic but not used in current scalp
+                sell_price_cents = max(1, int(round(latest_bid * 100)) - 1)
+                print(f"  [exec] placing sell {count}x {side} @ {sell_price_cents}¢ (current bid {latest_bid:.2f})", flush=True)
                 res = place_v2_sell(ticker, count, sell_price_cents, side=side)
                 print(f"  [ok] filled: {res}", flush=True)
                 return
