@@ -77,6 +77,8 @@ def fetch_market_state(ticker: str) -> dict:
         "status": detail.get("status"),
         "yes_bid": float(detail.get("yes_bid_dollars") or 0),
         "yes_ask": float(detail.get("yes_ask_dollars") or 0),
+        "no_bid": float(detail.get("no_bid_dollars") or 0),
+        "no_ask": float(detail.get("no_ask_dollars") or 0),
         "last_price": float(detail.get("last_price_dollars") or 0),
         "close_time": detail.get("close_time"),
         "expected_expiration_time": detail.get("expected_expiration_time"),
@@ -137,9 +139,17 @@ def monitor(
         spot = fetch_btc_spot()
         cushion = (spot - strike) if (spot is not None) else None
 
+        # Pick the bid/ask for our held side
+        if side == "yes":
+            our_bid = state["yes_bid"]
+            our_ask = state["yes_ask"]
+        else:
+            our_bid = state["no_bid"]
+            our_ask = state["no_ask"]
+
         print(
             f"  [{datetime.now(timezone.utc).strftime('%H:%M:%S')}] "
-            f"bid={state['yes_bid']:.2f} ask={state['yes_ask']:.2f} "
+            f"{side.upper()} bid={our_bid:.2f} ask={our_ask:.2f} "
             f"spot={spot} cushion={cushion} "
             f"close_in={secs_to_close:.0f}s status={state['status']}",
             flush=True,
@@ -150,14 +160,20 @@ def monitor(
         reason = ""
 
         # 1. Profit target hit
-        if state["yes_bid"] >= target_bid and side == "yes":
+        if our_bid >= target_bid:
             should_sell = True
-            reason = f"target_bid reached ({state['yes_bid']:.2f} >= {target_bid:.2f})"
+            reason = f"target_bid reached ({our_bid:.2f} >= {target_bid:.2f})"
 
-        # 2. Panic: spot near strike
-        elif cushion is not None and cushion < panic_cushion:
-            should_sell = True
-            reason = f"panic: cushion=${cushion:.0f} < ${panic_cushion}"
+        # 2. Panic: spot too close to (or past) strike in the wrong direction
+        # YES position: panic if cushion (spot - strike) drops below threshold
+        # NO  position: panic if cushion (spot - strike) rises above -threshold (spot near or above strike)
+        elif cushion is not None:
+            if side == "yes" and cushion < panic_cushion:
+                should_sell = True
+                reason = f"panic: cushion=${cushion:.0f} < ${panic_cushion}"
+            elif side == "no" and cushion > -panic_cushion:
+                should_sell = True
+                reason = f"panic: cushion=${cushion:.0f} > -${panic_cushion} (BTC near/above strike, NO at risk)"
 
         # 3. Past close: stop trying, position will auto-handle
         if secs_to_close < 0:
@@ -173,7 +189,7 @@ def monitor(
         if should_sell:
             print(f"[scalp_monitor] SELL triggered: {reason}", flush=True)
             if dry_run:
-                print(f"  [dry-run] would sell {count}x {side} @ market (bid {state['yes_bid']:.2f})", flush=True)
+                print(f"  [dry-run] would sell {count}x {side} @ market (bid {our_bid:.2f})", flush=True)
                 return
             try:
                 # Re-fetch the latest bid just before placing the sell, to avoid
@@ -182,9 +198,7 @@ def monitor(
                 # become a taker — a limit at the bid price can sit unfilled if
                 # the bid drops before our order lands.
                 latest = fetch_market_state(ticker)
-                latest_bid = latest["yes_bid"]
-                # For YES: sell at (latest_bid - 1)¢ to guarantee fill
-                # For NO: symmetric logic but not used in current scalp
+                latest_bid = latest["yes_bid"] if side == "yes" else latest["no_bid"]
                 sell_price_cents = max(1, int(round(latest_bid * 100)) - 1)
                 print(f"  [exec] placing sell {count}x {side} @ {sell_price_cents}¢ (current bid {latest_bid:.2f})", flush=True)
                 res = place_v2_sell(ticker, count, sell_price_cents, side=side)
