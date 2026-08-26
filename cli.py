@@ -1555,7 +1555,29 @@ def positions(
         data = api("GET", "portfolio/positions")
     except ApiError as e:
         handle_api_error(e)
-    ps = data.get("market_positions", [])
+    # Kalshi returns positions in two shapes on /portfolio/positions:
+    #   - market_positions (legacy): keyed by ticker, has 'position' field
+    #   - event_positions (current): keyed by event_ticker, has 'total_cost_shares_fp'
+    # Newer accounts only populate event_positions. Merge both so the CLI doesn't
+    # silently drop live positions.
+    ps = list(data.get("market_positions", []))
+    for ep in data.get("event_positions", []):
+        ticker = ep.get("event_ticker")
+        if not ticker:
+            continue
+        shares = float(ep.get("total_cost_shares_fp", 0) or 0)
+        if shares == 0:
+            continue
+        # Synthesize a market_positions-shaped entry so the rest of the pipeline works.
+        ps.append({
+            "ticker": ticker,
+            "position": int(shares),
+            "total_traded_dollars": ep.get("total_cost_dollars", 0),
+            "fees_paid_dollars": ep.get("fees_paid_dollars", 0),
+            "realized_pnl_dollars": ep.get("realized_pnl_dollars", 0),
+            "event_ticker": ticker,
+            "synthetic_from_event": True,
+        })
     ps = [p for p in ps if p.get("position", 0) != 0]
     if not ps:
         if json_mode(flag=json_output):
