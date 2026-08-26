@@ -25,7 +25,6 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CLI_DIR = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, CLI_DIR)
 
-import cli  # noqa: E402
 from cli import api, load_env, load_key  # noqa: E402
 
 

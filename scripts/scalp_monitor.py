@@ -28,16 +28,15 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CLI_DIR = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, CLI_DIR)
 
-import cli  # noqa: E402
 
 # Reuse the order helpers from cli.py
-from cli import api, load_env, load_key, _build_v2_order_body, ApiError  # noqa: E402
+from cli import ApiError, _build_v2_order_body, api, load_env, load_key  # noqa: E402
 
 
 def fetch_btc_spot() -> float | None:
     """Fetch BTC spot from multiple sources with fallback. Returns None on total failure."""
-    import urllib.request
     import json
+    import urllib.request
 
     sources = [
         # CoinGecko (free, rate-limited)
@@ -220,7 +219,7 @@ def monitor(
 
         # 3. Past close: stop trying, position will auto-handle
         if secs_to_close < 0:
-            print(f"[scalp_monitor] past close_time — exiting monitor", flush=True)
+            print("[scalp_monitor] past close_time — exiting monitor", flush=True)
             return
 
         # 4. Within close_grace: don't panic sell, let it settle

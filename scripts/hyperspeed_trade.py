@@ -29,7 +29,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CLI_DIR = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, CLI_DIR)
 
-from cli import api, load_env, load_key, _build_v2_order_body, ApiError  # noqa: E402
+from cli import ApiError, _build_v2_order_body, api, load_env, load_key  # noqa: E402
 
 
 def fetch_bid_ask(ticker: str, side: str) -> tuple:
@@ -69,7 +69,7 @@ def place_v2_order(ticker: str, side: str, count: int, price_cents: int, action:
 def cancel_order(order_id: str):
     try:
         api("DELETE", f"portfolio/events/orders/{order_id}")
-    except ApiError as e:
+    except ApiError:
         # Already filled or canceled — fine
         pass
 
@@ -138,7 +138,7 @@ def hyperspeed(
 
     # Step 3: wait for entry fill
     if not wait_for_fill(entry_order_id, entry_timeout):
-        print(f"  [timeout] entry order not filled, canceling", flush=True)
+        print("  [timeout] entry order not filled, canceling", flush=True)
         cancel_order(entry_order_id)
         return None
 
@@ -158,7 +158,7 @@ def hyperspeed(
 
     # Step 5: wait for exit fill
     if not wait_for_fill(exit_order_id, exit_timeout):
-        print(f"  [timeout] exit order not filled, canceling (position still open)", flush=True)
+        print("  [timeout] exit order not filled, canceling (position still open)", flush=True)
         cancel_order(exit_order_id)
         return {"entry": actual_fill_price, "exit": None, "status": "timeout"}
 
