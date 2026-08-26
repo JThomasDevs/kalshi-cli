@@ -130,11 +130,25 @@ def monitor(
     side: str,
     dry_run: bool,
     no_panic: bool = False,
+    cost_cents: float = 0.0,
+    max_loss_pct: float = 0.0,
+    min_loss_grace_secs: float = 0.0,
 ):
-    """Main monitor loop. Returns when position is sold or expired."""
+    """Main monitor loop. Returns when position is sold or expired.
+
+    Args:
+        cost_cents: average entry price per contract in cents (e.g. 76 for 76¢).
+                    Used by --max-loss to compute stop-out threshold.
+        max_loss_pct: if > 0, stop-loss trigger percent. Fires when
+                      our_bid <= cost * (1 - max_loss_pct/100) AND we're within
+                      min_loss_grace_secs of close_time. 0 disables.
+        min_loss_grace_secs: only fire stop-loss within this many seconds of
+                      close_time. Protects against early-volatility stop-outs.
+    """
     print(f"[scalp_monitor] starting on {ticker}", flush=True)
-    print(f"  strike={strike} target_bid={target_bid:.2f} panic_cushion=${panic_cushion}{'  [DISABLED]' if no_panic else ''}", flush=True)
-    print(f"  count={count} side={side} dry_run={dry_run}", flush=True)
+    max_loss_str = f"max_loss={max_loss_pct:.0f}%(grace={min_loss_grace_secs:.0f}s)" if max_loss_pct > 0 else "max_loss=off"
+    print(f"  strike={strike} target_bid={target_bid:.2f} panic_cushion=${panic_cushion}{'  [DISABLED]' if no_panic else ''}  {max_loss_str}", flush=True)
+    print(f"  count={count} side={side} cost={cost_cents}¢ dry_run={dry_run}", flush=True)
 
     while True:
         try:
@@ -183,6 +197,15 @@ def monitor(
             elif side == "no" and distance_to_strike < panic_cushion:
                 should_sell = True
                 reason = f"panic: spot ${cushion:+.0f} from strike (|${distance_to_strike:.0f}| < ${panic_cushion})"
+
+        # 3. Stop-loss: position has lost >max_loss_pct AND we're within grace
+        # This protects against catastrophic loss without panicking on early vol.
+        elif max_loss_pct > 0 and cost_cents > 0 and secs_to_close <= min_loss_grace_secs:
+            loss_threshold = cost_cents / 100 * (1 - max_loss_pct / 100)
+            if our_bid <= loss_threshold:
+                should_sell = True
+                loss_pct = (1 - our_bid / (cost_cents / 100)) * 100 if cost_cents > 0 else 0
+                reason = f"stop-loss: bid={our_bid:.2f} below {(1-max_loss_pct/100)*100:.0f}% of cost ({cost_cents/100:.2f}), loss ~{loss_pct:.0f}% (grace {secs_to_close:.0f}s)"
 
         # 3. Past close: stop trying, position will auto-handle
         if secs_to_close < 0:
@@ -233,6 +256,9 @@ def main():
     p.add_argument("--side", choices=["yes", "no"], default="yes", help="Side of the position (default yes)")
     p.add_argument("--dry-run", action="store_true", help="Print what would happen without placing orders")
     p.add_argument("--no-panic", action="store_true", help="Disable panic-cushion exit (only target-exit or hold to settlement)")
+    p.add_argument("--cost", type=float, default=0.0, help="Entry cost per contract in cents (e.g. 76 for 76¢). Required for --max-loss to work.")
+    p.add_argument("--max-loss-pct", type=float, default=0.0, help="Stop-loss percent. Fires when bid <= cost * (1-pct/100), only within --min-loss-grace-secs of close_time. 0 disables. Example: 50 = stop at 50%% loss.")
+    p.add_argument("--min-loss-grace-secs", type=float, default=1800.0, help="Only fire stop-loss within this many seconds of close_time (default 1800 = 30min). Prevents early-volatility stop-outs.")
     args = p.parse_args()
 
     # Load Kalshi credentials
@@ -250,6 +276,9 @@ def main():
         side=args.side,
         dry_run=args.dry_run,
         no_panic=args.no_panic,
+        cost_cents=args.cost,
+        max_loss_pct=args.max_loss_pct,
+        min_loss_grace_secs=args.min_loss_grace_secs,
     )
 
 
