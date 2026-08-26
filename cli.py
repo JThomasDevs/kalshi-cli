@@ -897,8 +897,7 @@ def markets(
             "status": m.get("status"),
             "expiration": m.get("expiration_time", "")[:10] if m.get("expiration_time") else ""
         } for m in ms]
-        console.print(json.dumps(output, indent=2))
-        raise typer.Exit()
+        output_json(output)
 
     console.print(market_table(ms, title=f"Kalshi Markets ({status}, top {len(ms)})"))
 
@@ -1322,7 +1321,7 @@ def orderbook(
             handle_api_error(e)
 
     if raw:
-        console.print(json.dumps(data, indent=2))
+        print(json.dumps(data, indent=2))
         return
 
     # If orderbook came back empty, ticker might be a series
@@ -1456,8 +1455,7 @@ def balance(json_output: bool = typer.Option(False, "--json", "-j", help="Output
     except ApiError as e:
         handle_api_error(e)
     if json_output:
-        console.print(json.dumps({"balance": data.get("balance", 0) / 100}, indent=2))
-        raise typer.Exit()
+        output_json({"balance": data.get("balance", 0) / 100})
 
     b = data.get("balance", 0) / 100
     console.print(f"\n[bold]Balance:[/bold] ${b:.2f}\n")
@@ -1560,6 +1558,8 @@ def positions(
     ps = data.get("market_positions", [])
     ps = [p for p in ps if p.get("position", 0) != 0]
     if not ps:
+        if json_mode(flag=json_output):
+            output_json([])
         console.print("[dim]No open positions[/dim]")
         raise typer.Exit()
 
@@ -1596,8 +1596,7 @@ def positions(
                 "expiration": p.get("expiration_time", "")[:10] if p.get("expiration_time") else ""
             })
 
-        console.print(json.dumps(output, indent=2))
-        raise typer.Exit()
+        output_json(output)
 
     # Original table output
     t = Table(title="Current Positions", box=box.ROUNDED)
@@ -1648,6 +1647,8 @@ def orders(json_output: bool = typer.Option(False, "--json", "-j", help="Output 
         handle_api_error(e)
     order_list = data.get("orders", [])
     if not order_list:
+        if json_mode(flag=json_output):
+            output_json([])
         console.print("[dim]No open orders[/dim]")
         raise typer.Exit()
 
@@ -1672,8 +1673,7 @@ def orders(json_output: bool = typer.Option(False, "--json", "-j", help="Output 
             "remaining": o.get("remaining_count", 0),
             "status": o.get("status", "")
         } for o in order_list]
-        console.print(json.dumps(output, indent=2))
-        raise typer.Exit()
+        output_json(output)
 
     for o in order_list:
         side_str = "[green]Yes[/green]" if o.get("side") == "yes" else "[red]No[/red]"
