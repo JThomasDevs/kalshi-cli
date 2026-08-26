@@ -123,18 +123,26 @@ def monitor(
     ticker: str,
     strike: float,
     target_bid: float,
-    panic_cushion: float,
     poll_secs: float,
     close_grace_secs: float,
     count: int,
     side: str,
     dry_run: bool,
-    no_panic: bool = False,
     cost_cents: float = 0.0,
     max_loss_pct: float = 0.0,
     min_loss_grace_secs: float = 0.0,
+    panic_cushion: float = 0.0,
 ):
     """Main monitor loop. Returns when position is sold or expired.
+
+    Exit rules (in priority order):
+      1. Target hit (bid >= target_bid)
+      2. Stop-loss (--max-loss-pct) within --min-loss-grace-secs of close
+      3. (Optional) Panic cushion (--panic-cushion) if user explicitly opts in
+
+    The default mode is target-only with optional stop-loss. Panic exits are
+    NEVER the default. The legacy --panic-cushion flag is preserved for
+    users who want it but is off by default (set panic_cushion=0 to disable).
 
     Args:
         cost_cents: average entry price per contract in cents (e.g. 76 for 76¢).
@@ -144,10 +152,13 @@ def monitor(
                       min_loss_grace_secs of close_time. 0 disables.
         min_loss_grace_secs: only fire stop-loss within this many seconds of
                       close_time. Protects against early-volatility stop-outs.
+        panic_cushion: OPT-IN legacy flag. If > 0, fires when spot is within
+                       this distance of strike. Off by default.
     """
     print(f"[scalp_monitor] starting on {ticker}", flush=True)
     max_loss_str = f"max_loss={max_loss_pct:.0f}%(grace={min_loss_grace_secs:.0f}s)" if max_loss_pct > 0 else "max_loss=off"
-    print(f"  strike={strike} target_bid={target_bid:.2f} panic_cushion=${panic_cushion}{'  [DISABLED]' if no_panic else ''}  {max_loss_str}", flush=True)
+    panic_str = f"panic_cushion=${panic_cushion}" if panic_cushion > 0 else "panic=off"
+    print(f"  strike={strike} target_bid={target_bid:.2f}  {panic_str}  {max_loss_str}", flush=True)
     print(f"  count={count} side={side} cost={cost_cents}¢ dry_run={dry_run}", flush=True)
 
     while True:
@@ -187,9 +198,9 @@ def monitor(
             should_sell = True
             reason = f"target_bid reached ({our_bid:.2f} >= {target_bid:.2f})"
 
-        # 2. Panic: spot too close to (or past) strike in the wrong direction
-        # Only fires when --no-panic is NOT set
-        elif not no_panic and cushion is not None:
+        # 2. (Optional) Panic cushion — only fires if user explicitly set --panic-cushion
+        # Legacy opt-in flag. NEVER the default.
+        elif panic_cushion > 0 and cushion is not None:
             distance_to_strike = abs(cushion)
             if side == "yes" and cushion < panic_cushion:
                 should_sell = True
@@ -249,15 +260,14 @@ def main():
     p.add_argument("--ticker", required=True, help="Market ticker to watch")
     p.add_argument("--strike", type=float, required=True, help="Strike price (e.g. 79100 for BTC strike markets)")
     p.add_argument("--target-bid", type=float, default=0.90, help="Sell when bid >= this (default 0.90)")
-    p.add_argument("--panic-cushion", type=float, default=20.0, help="Panic sell when spot is within $X of strike (default 20)")
+    p.add_argument("--panic-cushion", type=float, default=0.0, help="OPT-IN: panic sell when spot is within $X of strike. Default 0 (OFF). Legacy flag, prefer --max-loss-pct instead.")
     p.add_argument("--poll-secs", type=float, default=5.0, help="Seconds between polls (default 5)")
     p.add_argument("--close-grace-secs", type=float, default=60.0, help="Stop trading within this many seconds of close_time (default 60)")
     p.add_argument("--count", type=int, default=1, help="Number of contracts to monitor/sell (default 1)")
     p.add_argument("--side", choices=["yes", "no"], default="yes", help="Side of the position (default yes)")
     p.add_argument("--dry-run", action="store_true", help="Print what would happen without placing orders")
-    p.add_argument("--no-panic", action="store_true", help="Disable panic-cushion exit (only target-exit or hold to settlement)")
-    p.add_argument("--cost", type=float, default=0.0, help="Entry cost per contract in cents (e.g. 76 for 76¢). Required for --max-loss to work.")
-    p.add_argument("--max-loss-pct", type=float, default=0.0, help="Stop-loss percent. Fires when bid <= cost * (1-pct/100), only within --min-loss-grace-secs of close_time. 0 disables. Example: 50 = stop at 50%% loss.")
+    p.add_argument("--cost", type=float, default=0.0, help="Entry cost per contract in cents (e.g. 76 for 76¢). Required for --max-loss-pct to work.")
+    p.add_argument("--max-loss-pct", type=float, default=0.0, help="Stop-loss percent. Fires when bid <= cost * (1-pct/100), only within --min-loss-grace-secs of close_time. 0 disables. Recommended for protecting against catastrophic loss without panicking on early vol.")
     p.add_argument("--min-loss-grace-secs", type=float, default=1800.0, help="Only fire stop-loss within this many seconds of close_time (default 1800 = 30min). Prevents early-volatility stop-outs.")
     args = p.parse_args()
 
@@ -269,16 +279,15 @@ def main():
         ticker=args.ticker,
         strike=args.strike,
         target_bid=args.target_bid,
-        panic_cushion=args.panic_cushion,
         poll_secs=args.poll_secs,
         close_grace_secs=args.close_grace_secs,
         count=args.count,
         side=args.side,
         dry_run=args.dry_run,
-        no_panic=args.no_panic,
         cost_cents=args.cost,
         max_loss_pct=args.max_loss_pct,
         min_loss_grace_secs=args.min_loss_grace_secs,
+        panic_cushion=args.panic_cushion,
     )
 
 
